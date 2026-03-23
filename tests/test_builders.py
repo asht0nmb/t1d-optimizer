@@ -54,6 +54,18 @@ def _cgm(dt: datetime, bg: int, seq: int = 0) -> MagicMock:
     e.eventTimestamp = _ts(dt)
     e.currentglucosedisplayvalue = bg
     e.seqNum = seq
+    e.cgmDataTypeRaw = 1
+    e.egvTimestamp = None
+    return e
+
+
+def _cgm_backfill(dt_event, dt_sensor, bg, seq=0, data_type_raw=2):
+    e = MagicMock(spec=LidCgmDataG7)
+    e.eventTimestamp = _ts(dt_event)
+    e.currentglucosedisplayvalue = bg
+    e.seqNum = seq
+    e.cgmDataTypeRaw = data_type_raw
+    e.egvTimestamp = dt_sensor
     return e
 
 
@@ -153,13 +165,15 @@ class TestBuildCgmDf:
         events = [_cgm(dt1, 150, 1), _cgm(dt2, 160, 2)]
         df = build_cgm_df(events, SERIAL)
         assert len(df) == 2
-        assert list(df.columns) == ["timestamp", "bg_mgdl", "pump_serial"]
+        assert list(df.columns) == ["timestamp", "bg_mgdl", "backfilled", "sensor_timestamp", "pump_serial", "seqnum"]
         assert df.iloc[0]["bg_mgdl"] == 150
         assert df.iloc[1]["bg_mgdl"] == 160
 
-    def test_dedup_on_timestamp(self):
+    def test_dedup_on_seqnum(self):
+        """Two events with the same seqnum dedup to 1; same timestamp but different seqnum kept."""
         dt = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
-        events = [_cgm(dt, 150, 1), _cgm(dt, 155, 2)]
+        # Same seqnum → dedup
+        events = [_cgm(dt, 150, seq=1), _cgm(dt, 155, seq=1)]
         df = build_cgm_df(events, SERIAL)
         assert len(df) == 1
         assert df.iloc[0]["bg_mgdl"] == 150  # keep="first"
@@ -167,12 +181,57 @@ class TestBuildCgmDf:
     def test_empty_list(self):
         df = build_cgm_df([], SERIAL)
         assert df.empty
-        assert list(df.columns) == ["timestamp", "bg_mgdl", "pump_serial"]
+        assert list(df.columns) == ["timestamp", "bg_mgdl", "backfilled", "sensor_timestamp", "pump_serial", "seqnum"]
 
     def test_non_cgm_events_ignored(self):
         events = [_bolus_completed(datetime(2026, 3, 20, 10, 0, tzinfo=PST), 2.0, 1)]
         df = build_cgm_df(events, SERIAL)
         assert df.empty
+
+    def test_backfill_preserved_not_deduped(self):
+        """3 backfilled readings with same eventTimestamp but different seqnums → all 3 preserved."""
+        dt_event = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        dt_s1 = datetime(2026, 3, 20, 9, 45, tzinfo=PST)
+        dt_s2 = datetime(2026, 3, 20, 9, 50, tzinfo=PST)
+        dt_s3 = datetime(2026, 3, 20, 9, 55, tzinfo=PST)
+        events = [
+            _cgm_backfill(dt_event, dt_s1, 120, seq=100),
+            _cgm_backfill(dt_event, dt_s2, 125, seq=101),
+            _cgm_backfill(dt_event, dt_s3, 130, seq=102),
+        ]
+        df = build_cgm_df(events, SERIAL)
+        assert len(df) == 3
+
+    def test_backfill_column_present(self):
+        """backfilled=True for cgmDataTypeRaw=2."""
+        dt_event = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        dt_sensor = datetime(2026, 3, 20, 9, 50, tzinfo=PST)
+        events = [_cgm_backfill(dt_event, dt_sensor, 120, seq=100, data_type_raw=2)]
+        df = build_cgm_df(events, SERIAL)
+        assert df.iloc[0]["backfilled"] == True
+
+    def test_live_reading_not_backfilled(self):
+        """backfilled=False for cgmDataTypeRaw=1."""
+        dt = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        events = [_cgm(dt, 150, seq=1)]
+        df = build_cgm_df(events, SERIAL)
+        assert df.iloc[0]["backfilled"] == False
+
+    def test_sensor_timestamp_stored(self):
+        """sensor_timestamp populated from egvTimestamp."""
+        dt_event = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        dt_sensor = datetime(2026, 3, 20, 9, 50, tzinfo=PST)
+        events = [_cgm_backfill(dt_event, dt_sensor, 120, seq=100)]
+        df = build_cgm_df(events, SERIAL)
+        assert df.iloc[0]["sensor_timestamp"] == dt_sensor
+
+    def test_seqnum_column_present(self):
+        """seqnum column exists and has correct value."""
+        dt = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        events = [_cgm(dt, 150, seq=42)]
+        df = build_cgm_df(events, SERIAL)
+        assert "seqnum" in df.columns
+        assert df.iloc[0]["seqnum"] == 42
 
 
 # ===========================================================================
