@@ -440,7 +440,7 @@ class TestBuildAll:
             _bolus_completed(datetime(2026, 3, 20, 12, 0, tzinfo=PST), 3.0, 1),
         ]
         result = build_all(events, SERIAL)
-        expected_keys = {"cgm", "bolus", "requests", "basal", "suspension", "events"}
+        expected_keys = {"cgm", "bolus", "requests", "basal", "suspension", "events", "alarms"}
         assert set(result.keys()) == expected_keys
 
     def test_unknown_event_logged(self, caplog):
