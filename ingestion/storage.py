@@ -25,7 +25,7 @@ PARQUET_FILES: dict[str, str] = {
 }
 
 DEDUP_KEYS: dict[str, list[str]] = {
-    "cgm": ["timestamp", "pump_serial"],
+    "cgm": ["seqnum", "pump_serial"],
     "bolus": ["bolus_id", "pump_serial"],
     "requests": ["bolus_id", "pump_serial"],
     "basal": ["timestamp", "pump_serial"],

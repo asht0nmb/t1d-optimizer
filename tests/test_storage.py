@@ -28,6 +28,7 @@ class TestSaveLoadRoundTrip:
             "timestamp": [datetime(2026, 3, 20, 10, 0, tzinfo=PST)],
             "bg_mgdl": [150],
             "pump_serial": ["TEST123"],
+            "seqnum": [1],
         })
         storage.save_df("cgm", df)
         loaded = storage.load_df("cgm")
@@ -44,6 +45,7 @@ class TestSaveLoadRoundTrip:
             ],
             "bg_mgdl": [150, 160],
             "pump_serial": ["TEST123", "TEST123"],
+            "seqnum": [1, 2],
         })
         df2 = pd.DataFrame({
             "timestamp": [
@@ -52,12 +54,13 @@ class TestSaveLoadRoundTrip:
             ],
             "bg_mgdl": [160, 170],
             "pump_serial": ["TEST123", "TEST123"],
+            "seqnum": [2, 3],
         })
         storage.save_df("cgm", df1)
         storage.save_df("cgm", df2)
         loaded = storage.load_df("cgm")
         assert loaded is not None
-        assert len(loaded) == 3  # 10:00, 10:05, 10:10
+        assert len(loaded) == 3  # seqnum 1, 2, 3
 
     def test_empty_df_no_file_written(self, tmp_path):
         storage.save_df("cgm", pd.DataFrame())
@@ -79,6 +82,7 @@ class TestCleanAll:
             "timestamp": [datetime(2026, 3, 20, 10, 0, tzinfo=PST)],
             "bg_mgdl": [150],
             "pump_serial": ["TEST123"],
+            "seqnum": [1],
         })
         storage.save_df("cgm", df)
         # Also save fetch state

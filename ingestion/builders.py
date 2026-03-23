@@ -73,15 +73,20 @@ def build_cgm_df(events: list, pump_serial: str) -> pd.DataFrame:
     rows = []
     for e in events:
         if isinstance(e, (LidCgmDataG7, LidCgmDataGxb, LidCgmDataFsl2)):
+            data_type_raw = getattr(e, 'cgmDataTypeRaw', 1)
             rows.append({
                 "timestamp": e.eventTimestamp.datetime,
                 "bg_mgdl": int(e.currentglucosedisplayvalue),
+                "backfilled": data_type_raw == 2,
+                "sensor_timestamp": getattr(e, 'egvTimestamp', None),
                 "pump_serial": pump_serial,
+                "seqnum": int(e.seqNum),
             })
 
-    df = pd.DataFrame(rows, columns=["timestamp", "bg_mgdl", "pump_serial"])
+    columns = ["timestamp", "bg_mgdl", "backfilled", "sensor_timestamp", "pump_serial", "seqnum"]
+    df = pd.DataFrame(rows, columns=columns)
     if not df.empty:
-        df = df.drop_duplicates(subset=["timestamp"], keep="first")
+        df = df.drop_duplicates(subset=["seqnum", "pump_serial"], keep="first")
         df = df.sort_values("timestamp").reset_index(drop=True)
     return df
 
