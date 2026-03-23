@@ -64,6 +64,38 @@ def run_incremental_fetch() -> None:
     logger.info("Incremental update complete.")
 
 
+def run_day_fetch(date_str: str) -> None:
+    """Fetch a single day's data from the active pump (±1 day padding)."""
+    target = date.fromisoformat(date_str)
+    start = (target - timedelta(days=1)).isoformat()
+    end = (target + timedelta(days=1)).isoformat()
+
+    api = get_api()
+    metadata = get_pump_metadata(api)
+
+    # Use the most recent pump (last in sorted-by-minDate list)
+    pump = metadata[-1]
+    serial = str(pump["serialNumber"])
+    device_id = pump["tconnectDeviceId"]
+
+    logger.info("Day fetch: pump %s, range %s → %s", serial, start, end)
+
+    # Fetch and process without updating fetch state
+    events, _ = fetch_pump_events(api, device_id, start, end, pump_serial=serial)
+
+    if not events:
+        logger.info("No events returned for %s", date_str)
+        return
+
+    dfs = build_all(events, serial)
+    for name, df in dfs.items():
+        if not df.empty:
+            save_df(name, df)
+            logger.info("  %s: %d rows saved", name, len(df))
+
+    logger.info("Day fetch complete for %s", date_str)
+
+
 def _process_pump(
     api,
     device_id: int,

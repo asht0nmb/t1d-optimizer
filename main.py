@@ -18,8 +18,14 @@ def main():
 
     sub.add_parser("update", help="Incremental update (new data since last fetch)")
 
+    day_parser = sub.add_parser("fetch-day", help="Fetch a single day from the active pump")
+    day_parser.add_argument("--date", required=True, help="Date to fetch (YYYY-MM-DD)")
+
     check_parser = sub.add_parser("check", help="Sanity check a specific date")
     check_parser.add_argument("--date", required=True, help="Date to check (YYYY-MM-DD)")
+
+    viz_parser = sub.add_parser("viz", help="Visualize a day's data")
+    viz_parser.add_argument("--date", required=True, help="Date to visualize (YYYY-MM-DD)")
 
     args = parser.parse_args()
 
@@ -39,9 +45,17 @@ def main():
         from ingestion import run_incremental_fetch
         run_incremental_fetch()
 
+    elif args.command == "fetch-day":
+        from ingestion import run_day_fetch
+        run_day_fetch(args.date)
+
     elif args.command == "check":
         from scripts.sanity_check import sanity_check
         sanity_check(args.date)
+
+    elif args.command == "viz":
+        from scripts.daily_viz import daily_viz
+        daily_viz(args.date)
 
     else:
         parser.print_help()
