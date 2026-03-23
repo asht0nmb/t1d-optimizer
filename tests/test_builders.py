@@ -233,6 +233,31 @@ class TestBuildCgmDf:
         assert "seqnum" in df.columns
         assert df.iloc[0]["seqnum"] == 42
 
+    def test_stale_reading_dropped(self):
+        """Two readings 1s apart (different seqnums): keep first, drop stale second."""
+        dt1 = datetime(2026, 3, 20, 12, 3, 15, tzinfo=PST)
+        dt2 = datetime(2026, 3, 20, 12, 3, 16, tzinfo=PST)
+        events = [_cgm(dt1, 344, seq=50), _cgm(dt2, 136, seq=51)]
+        df = build_cgm_df(events, SERIAL)
+        assert len(df) == 1
+        assert df.iloc[0]["bg_mgdl"] == 344
+
+    def test_normal_5min_spacing_preserved(self):
+        """Two readings 5 minutes apart: both kept."""
+        dt1 = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        dt2 = datetime(2026, 3, 20, 10, 5, tzinfo=PST)
+        events = [_cgm(dt1, 150, seq=60), _cgm(dt2, 160, seq=61)]
+        df = build_cgm_df(events, SERIAL)
+        assert len(df) == 2
+
+    def test_exactly_60s_kept(self):
+        """Two readings exactly 60 seconds apart: both kept (filter is strictly <60s)."""
+        dt1 = datetime(2026, 3, 20, 10, 0, 0, tzinfo=PST)
+        dt2 = datetime(2026, 3, 20, 10, 1, 0, tzinfo=PST)
+        events = [_cgm(dt1, 150, seq=70), _cgm(dt2, 160, seq=71)]
+        df = build_cgm_df(events, SERIAL)
+        assert len(df) == 2
+
 
 # ===========================================================================
 # 2. build_bolus_df

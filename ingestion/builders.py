@@ -88,6 +88,10 @@ def build_cgm_df(events: list, pump_serial: str) -> pd.DataFrame:
     if not df.empty:
         df = df.drop_duplicates(subset=["seqnum", "pump_serial"], keep="first")
         df = df.sort_values("timestamp").reset_index(drop=True)
+    if not df.empty and len(df) > 1:
+        time_diff = df["timestamp"].diff()
+        mask = time_diff.isna() | (time_diff >= pd.Timedelta(seconds=60)) | df["backfilled"]
+        df = df[mask].reset_index(drop=True)
     return df
 
 
