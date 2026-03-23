@@ -444,7 +444,86 @@ def build_events_df(events: list, pump_serial: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 7. Top-level routing
+# 7. Alarms / alerts / CGM alerts
+# ---------------------------------------------------------------------------
+
+_ALERT_NAME_OVERRIDES: dict[int, str] = {
+    50: "high_bg_alert",
+    51: "low_bg_alert",
+}
+
+_CGM_DALERT_MAP: dict[int, str] = {
+    1: "cgm_urgent_low",
+    2: "cgm_high",
+    3: "cgm_low",
+    6: "cgm_rise_rate",
+    8: "cgm_fall_rate",
+    14: "cgm_out_of_range",
+}
+
+
+def build_alarm_df(events: list, pump_serial: str) -> pd.DataFrame:
+    """Build unified alarm/alert/cgm_alert DataFrame."""
+    rows: list[dict] = []
+
+    for e in events:
+        if isinstance(e, (LidAlarmActivated, LidAlarmCleared)):
+            category = "alarm"
+            action = "activated" if isinstance(e, LidAlarmActivated) else "cleared"
+            alarm_id = int(e.alarmidRaw)
+            alarm_name = e.alarmid.name
+            p1 = float(e.param1) if hasattr(e, "param1") else float("nan")
+            p2 = float(e.param2) if hasattr(e, "param2") else float("nan")
+
+        elif isinstance(e, (LidAlertActivated, LidAlertCleared)):
+            category = "alert"
+            action = "activated" if isinstance(e, LidAlertActivated) else "cleared"
+            alarm_id = int(e.alertidRaw)
+            raw_name = e.alertid.name
+            alarm_name = _ALERT_NAME_OVERRIDES.get(alarm_id, raw_name)
+            p1 = float(e.param1) if hasattr(e, "param1") else float("nan")
+            p2 = float(e.param2) if hasattr(e, "param2") else float("nan")
+
+        elif isinstance(e, (LidCgmAlertActivatedDex, LidCgmAlertClearedDex, LidCgmAlertAckDex)):
+            category = "cgm_alert"
+            if isinstance(e, LidCgmAlertActivatedDex):
+                action = "activated"
+            elif isinstance(e, LidCgmAlertClearedDex):
+                action = "cleared"
+            else:
+                action = "ack"
+            alarm_id = int(e.dalertidRaw)
+            alarm_name = _CGM_DALERT_MAP.get(alarm_id, str(e.dalertid) if e.dalertid is not None else f"unknown_{alarm_id}")
+            p1 = float(e.param1) if hasattr(e, "param1") else float("nan")
+            p2 = float(e.param2) if hasattr(e, "param2") else float("nan")
+
+        else:
+            continue
+
+        rows.append({
+            "timestamp": e.eventTimestamp.datetime,
+            "category": category,
+            "action": action,
+            "alarm_id": alarm_id,
+            "alarm_name": alarm_name,
+            "param1": p1,
+            "param2": p2,
+            "seqnum": int(e.seqNum),
+            "pump_serial": pump_serial,
+        })
+
+    columns = [
+        "timestamp", "category", "action", "alarm_id", "alarm_name",
+        "param1", "param2", "seqnum", "pump_serial",
+    ]
+    df = pd.DataFrame(rows, columns=columns)
+    if not df.empty:
+        df = df.sort_values("timestamp").reset_index(drop=True)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 8. Top-level routing
 # ---------------------------------------------------------------------------
 
 def build_all(events: list, pump_serial: str) -> dict[str, pd.DataFrame]:
@@ -459,6 +538,7 @@ def build_all(events: list, pump_serial: str) -> dict[str, pd.DataFrame]:
         "basal": build_basal_df(events, pump_serial),
         "suspension": build_suspension_df(events, pump_serial),
         "events": build_events_df(events, pump_serial),
+        "alarms": build_alarm_df(events, pump_serial),
     }
 
     # Detect unknown event types

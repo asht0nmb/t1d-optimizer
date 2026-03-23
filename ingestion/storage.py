@@ -21,6 +21,7 @@ PARQUET_FILES: dict[str, str] = {
     "basal": "basal.parquet",
     "suspension": "suspension.parquet",
     "events": "events.parquet",
+    "alarms": "alarms.parquet",
 }
 
 DEDUP_KEYS: dict[str, list[str]] = {
@@ -30,6 +31,7 @@ DEDUP_KEYS: dict[str, list[str]] = {
     "basal": ["timestamp", "pump_serial"],
     "suspension": ["suspend_timestamp", "pump_serial"],
     "events": ["pump_serial", "seqnum"],
+    "alarms": ["pump_serial", "seqnum"],
 }
 
 
