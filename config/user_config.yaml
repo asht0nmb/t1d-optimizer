@@ -1,0 +1,34 @@
+ingestion:
+  timezone: "America/Los_Angeles"
+  chunk_days: 30
+  overlap_days: 1
+
+bg_targets:
+  low: 70
+  high: 180
+  target: 110
+
+meal_detection:
+  rise_threshold_per_5min: 8
+  sustained_intervals: 3
+  no_bolus_window_minutes: 30
+  meal_windows:
+    - [6, 10]
+    - [11, 14]
+    - [17, 23]
+
+anomaly_detection:
+  spike_threshold: 180
+  drop_threshold: 70
+  flatline_tolerance: 2
+
+clustering:
+  method: kmeans
+  n_clusters: 5
+  feature_mode: aggregated
+
+notifications:
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  confidence_threshold: 0.75
+  cooldown_minutes: 30
