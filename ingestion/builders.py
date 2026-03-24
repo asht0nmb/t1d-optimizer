@@ -26,6 +26,7 @@ from tconnectsync.eventparser.events import (
     LidVersionsA, LidVersionInfo, LidShelfMode, LidArmInit,
     LidDailyBasal, LidCarbsEntered,
     LidCgmStartSessionGx,
+    LidUsbConnected, LidUsbDisconnected,
 )
 from tconnectsync.eventparser.raw_event import RawEvent
 
@@ -60,6 +61,7 @@ _HANDLED_TYPES = (
     LidVersionsA, LidVersionInfo, LidShelfMode, LidArmInit,
     LidDailyBasal, LidCarbsEntered,
     LidCgmStartSessionGx,
+    LidUsbConnected, LidUsbDisconnected,
     RawEvent,
 )
 
@@ -236,12 +238,29 @@ _SUSPEND_REASON_MAP = {
 
 def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
     """Build suspension episode DataFrame by pairing suspend/resume events."""
+    # Build alarm lookup: timestamp → (alarmidRaw, alarm_name)
+    alarm_lookup: dict = {}
+    for e in events:
+        if isinstance(e, LidAlarmActivated):
+            name = e.alarmid.name if e.alarmid is not None else None
+            alarm_lookup[e.eventTimestamp.datetime] = (e.alarmidRaw, name)
+
     # Gather and sort all suspend + resume events by timestamp
     sus_events = []
     for e in events:
         if isinstance(e, (LidPumpingSuspended, LidPumpingResumed)):
             sus_events.append(e)
     sus_events.sort(key=lambda e: e.eventTimestamp.datetime)
+
+    def _alarm_fields(suspend_event):
+        """Return alarm_id and alarm_name for a suspend event."""
+        reason = _SUSPEND_REASON_MAP.get(suspend_event.suspendreasonRaw, "unknown")
+        if reason == "alarm":
+            ts = suspend_event.eventTimestamp.datetime
+            if ts in alarm_lookup:
+                aid, aname = alarm_lookup[ts]
+                return aid, aname
+        return float("nan"), None
 
     episodes: list[dict] = []
     current_suspend = None
@@ -253,6 +272,7 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
                 suspend_ts = current_suspend.eventTimestamp.datetime
                 resume_ts = e.eventTimestamp.datetime
                 dur = (resume_ts - suspend_ts).total_seconds() / 60.0
+                a_id, a_name = _alarm_fields(current_suspend)
                 episodes.append({
                     "suspend_timestamp": suspend_ts,
                     "resume_timestamp": resume_ts,
@@ -263,6 +283,8 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
                     "insulin_at_suspend": int(current_suspend.insulinamount),
                     "pairing_suspect": True,
                     "pump_serial": pump_serial,
+                    "alarm_id": a_id,
+                    "alarm_name": a_name,
                 })
             current_suspend = e
 
@@ -274,6 +296,7 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
             resume_ts = e.eventTimestamp.datetime
             dur = (resume_ts - suspend_ts).total_seconds() / 60.0
             pairing_suspect = dur > 1440
+            a_id, a_name = _alarm_fields(current_suspend)
             episodes.append({
                 "suspend_timestamp": suspend_ts,
                 "resume_timestamp": resume_ts,
@@ -284,11 +307,14 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
                 "insulin_at_suspend": int(current_suspend.insulinamount),
                 "pairing_suspect": pairing_suspect,
                 "pump_serial": pump_serial,
+                "alarm_id": a_id,
+                "alarm_name": a_name,
             })
             current_suspend = None
 
     # Unpaired suspend at end
     if current_suspend is not None:
+        a_id, a_name = _alarm_fields(current_suspend)
         episodes.append({
             "suspend_timestamp": current_suspend.eventTimestamp.datetime,
             "resume_timestamp": pd.NaT,
@@ -299,11 +325,14 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
             "insulin_at_suspend": int(current_suspend.insulinamount),
             "pairing_suspect": False,
             "pump_serial": pump_serial,
+            "alarm_id": a_id,
+            "alarm_name": a_name,
         })
 
     columns = [
         "suspend_timestamp", "resume_timestamp", "duration_minutes",
         "suspend_reason", "insulin_at_suspend", "pairing_suspect", "pump_serial",
+        "alarm_id", "alarm_name",
     ]
     df = pd.DataFrame(episodes, columns=columns)
     return df
@@ -480,7 +509,7 @@ def build_alarm_df(events: list, pump_serial: str) -> pd.DataFrame:
             category = "alarm"
             action = "activated" if isinstance(e, LidAlarmActivated) else "cleared"
             alarm_id = int(e.alarmidRaw)
-            alarm_name = e.alarmid.name
+            alarm_name = e.alarmid.name if e.alarmid else f"alarm_{alarm_id}"
             p1 = float(e.param1) if hasattr(e, "param1") else float("nan")
             p2 = float(e.param2) if hasattr(e, "param2") else float("nan")
 
@@ -488,7 +517,7 @@ def build_alarm_df(events: list, pump_serial: str) -> pd.DataFrame:
             category = "alert"
             action = "activated" if isinstance(e, LidAlertActivated) else "cleared"
             alarm_id = int(e.alertidRaw)
-            raw_name = e.alertid.name
+            raw_name = e.alertid.name if e.alertid else f"alert_{alarm_id}"
             alarm_name = _ALERT_NAME_OVERRIDES.get(alarm_id, raw_name)
             p1 = float(e.param1) if hasattr(e, "param1") else float("nan")
             p2 = float(e.param2) if hasattr(e, "param2") else float("nan")
