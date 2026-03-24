@@ -12,6 +12,7 @@ from tconnectsync.eventparser.events import (
     LidAaDailyStatus,
     LidAaPcmChange,
     LidAaUserModeChange,
+    LidAlarmActivated,
     LidBasalDelivery,
     LidBolusCompleted,
     LidBolusRequestedMsg1,
@@ -123,6 +124,15 @@ def _suspend(dt: datetime, reason_raw: int = 0, insulin: int = 200) -> MagicMock
 def _resume(dt: datetime) -> MagicMock:
     e = MagicMock(spec=LidPumpingResumed)
     e.eventTimestamp = _ts(dt)
+    return e
+
+
+def _alarm_activated(dt, alarm_id_raw, alarm_name="TestAlarm"):
+    e = MagicMock(spec=LidAlarmActivated)
+    e.eventTimestamp = _ts(dt)
+    e.alarmidRaw = alarm_id_raw
+    e.alarmid = MagicMock()
+    e.alarmid.name = alarm_name
     return e
 
 
@@ -474,6 +484,44 @@ class TestBuildSuspensionDf:
         events = [_suspend(t0, reason_raw=6), _resume(t1)]
         df = build_suspension_df(events, SERIAL)
         assert df.iloc[0]["suspend_reason"] == "plgs_auto"
+
+    def test_alarm_enrichment_by_timestamp(self):
+        """Alarm-caused suspend matched to LidAlarmActivated at same timestamp."""
+        t0 = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        t1 = datetime(2026, 3, 20, 10, 30, tzinfo=PST)
+        events = [
+            _suspend(t0, reason_raw=1),
+            _alarm_activated(t0, alarm_id_raw=2, alarm_name="OcclusionAlarm"),
+            _resume(t1),
+        ]
+        df = build_suspension_df(events, SERIAL)
+        assert len(df) == 1
+        assert df.iloc[0]["alarm_id"] == 2
+        assert df.iloc[0]["alarm_name"] == "OcclusionAlarm"
+
+    def test_no_alarm_at_timestamp_yields_nan(self):
+        """Alarm-caused suspend with no matching LidAlarmActivated gets NaN."""
+        t0 = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        t1 = datetime(2026, 3, 20, 10, 30, tzinfo=PST)
+        events = [_suspend(t0, reason_raw=1), _resume(t1)]
+        df = build_suspension_df(events, SERIAL)
+        assert len(df) == 1
+        assert math.isnan(df.iloc[0]["alarm_id"])
+        assert df.iloc[0]["alarm_name"] is None
+
+    def test_user_suspend_no_alarm_enrichment(self):
+        """User-initiated suspend at same timestamp as alarm: no enrichment."""
+        t0 = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        t1 = datetime(2026, 3, 20, 10, 30, tzinfo=PST)
+        events = [
+            _suspend(t0, reason_raw=0),
+            _alarm_activated(t0, alarm_id_raw=2, alarm_name="OcclusionAlarm"),
+            _resume(t1),
+        ]
+        df = build_suspension_df(events, SERIAL)
+        assert len(df) == 1
+        assert math.isnan(df.iloc[0]["alarm_id"])
+        assert df.iloc[0]["alarm_name"] is None
 
 
 # ===========================================================================
