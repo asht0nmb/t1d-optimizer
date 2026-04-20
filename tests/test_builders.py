@@ -66,7 +66,7 @@ def _cgm_backfill(dt_event, dt_sensor, bg, seq=0, data_type_raw=2):
     e.currentglucosedisplayvalue = bg
     e.seqNum = seq
     e.cgmDataTypeRaw = data_type_raw
-    e.egvTimestamp = dt_sensor
+    e.egvTimestamp = _ts(dt_sensor)  # Arrow-like with .datetime
     return e
 
 
@@ -227,13 +227,14 @@ class TestBuildCgmDf:
         df = build_cgm_df(events, SERIAL)
         assert df.iloc[0]["backfilled"] == False
 
-    def test_sensor_timestamp_stored(self):
-        """sensor_timestamp populated from egvTimestamp."""
+    def test_backfill_stores_pump_received_time(self):
+        """For backfills, sensor_timestamp stores the pump-received time (eventTimestamp)."""
         dt_event = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
         dt_sensor = datetime(2026, 3, 20, 9, 50, tzinfo=PST)
         events = [_cgm_backfill(dt_event, dt_sensor, 120, seq=100)]
         df = build_cgm_df(events, SERIAL)
-        assert df.iloc[0]["sensor_timestamp"] == dt_sensor
+        assert df.iloc[0]["timestamp"] == dt_sensor  # sensor time is primary
+        assert df.iloc[0]["sensor_timestamp"] == dt_event  # pump-received is secondary
 
     def test_seqnum_column_present(self):
         """seqnum column exists and has correct value."""
@@ -242,6 +243,36 @@ class TestBuildCgmDf:
         df = build_cgm_df(events, SERIAL)
         assert "seqnum" in df.columns
         assert df.iloc[0]["seqnum"] == 42
+
+    def test_backfill_uses_sensor_time_as_timestamp(self):
+        """Backfilled readings should use egvTimestamp (sensor time) as primary timestamp."""
+        dt_event = datetime(2026, 3, 20, 12, 3, tzinfo=PST)  # pump received
+        dt_sensor = datetime(2026, 3, 20, 9, 50, tzinfo=PST)  # actual reading
+        events = [_cgm_backfill(dt_event, dt_sensor, 200, seq=100)]
+        df = build_cgm_df(events, SERIAL)
+        assert df.iloc[0]["timestamp"] == dt_sensor  # sensor time, not pump time
+
+    def test_backfill_sorted_by_sensor_time(self):
+        """Multiple backfills should sort by their actual sensor times, not arrival time."""
+        dt_event = datetime(2026, 3, 20, 12, 3, tzinfo=PST)
+        dt_s1 = datetime(2026, 3, 20, 9, 45, tzinfo=PST)
+        dt_s2 = datetime(2026, 3, 20, 9, 50, tzinfo=PST)
+        dt_s3 = datetime(2026, 3, 20, 9, 55, tzinfo=PST)
+        events = [
+            _cgm_backfill(dt_event, dt_s3, 130, seq=102),  # out of order
+            _cgm_backfill(dt_event, dt_s1, 120, seq=100),
+            _cgm_backfill(dt_event, dt_s2, 125, seq=101),
+        ]
+        df = build_cgm_df(events, SERIAL)
+        assert len(df) == 3
+        assert list(df["bg_mgdl"]) == [120, 125, 130]  # sorted by sensor time
+
+    def test_live_reading_uses_event_timestamp(self):
+        """Live readings should continue using eventTimestamp as primary timestamp."""
+        dt = datetime(2026, 3, 20, 10, 0, tzinfo=PST)
+        events = [_cgm(dt, 150, seq=1)]
+        df = build_cgm_df(events, SERIAL)
+        assert df.iloc[0]["timestamp"] == dt
 
     def test_stale_reading_dropped(self):
         """Two readings 1s apart (different seqnums): keep first, drop stale second."""

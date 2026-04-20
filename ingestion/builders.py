@@ -71,16 +71,33 @@ _HANDLED_TYPES = (
 # ---------------------------------------------------------------------------
 
 def build_cgm_df(events: list, pump_serial: str) -> pd.DataFrame:
-    """Build CGM readings DataFrame from G7, Gxb, and FSL2 events."""
+    """Build CGM readings DataFrame from G7, Gxb, and FSL2 events.
+
+    For backfilled readings (cgmDataTypeRaw=2), uses the sensor reading time
+    (egvTimestamp) as the primary timestamp since these readings weren't
+    available to the pump in real time.
+    """
     rows = []
     for e in events:
         if isinstance(e, (LidCgmDataG7, LidCgmDataGxb, LidCgmDataFsl2)):
             data_type_raw = getattr(e, 'cgmDataTypeRaw', 1)
+            is_backfill = data_type_raw == 2
+
+            egv_ts = getattr(e, 'egvTimestamp', None)
+            if is_backfill and egv_ts is not None:
+                # Backfilled: use actual sensor time, store pump-received time
+                timestamp = egv_ts.datetime
+                sensor_timestamp = e.eventTimestamp.datetime
+            else:
+                # Live: use pump-received time
+                timestamp = e.eventTimestamp.datetime
+                sensor_timestamp = None
+
             rows.append({
-                "timestamp": e.eventTimestamp.datetime,
+                "timestamp": timestamp,
                 "bg_mgdl": int(e.currentglucosedisplayvalue),
-                "backfilled": data_type_raw == 2,
-                "sensor_timestamp": getattr(e, 'egvTimestamp', None),
+                "backfilled": is_backfill,
+                "sensor_timestamp": sensor_timestamp,
                 "pump_serial": pump_serial,
                 "seqnum": int(e.seqNum),
             })
