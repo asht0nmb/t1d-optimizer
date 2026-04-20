@@ -1,42 +1,62 @@
-# Handoff: Ingestion Layer — Session 2
+# Handoff: Session 3 — Data Verification & Exploration
 
 **Date:** 2026-03-23
-**Status:** Implementation complete, awaiting real-data verification with user
+**Status:** Data verification in progress. 6 data issues documented, pipeline fixes pending.
 
 ---
 
-## What Was Built This Session
+## What Was Done This Session
 
-The full ingestion layer is now implemented. The pipeline looks like:
+1. **Added `fetch-day` CLI command** — targeted single-day fetch from the active pump (±1 day padding). Much faster than full fetch for spot-checking.
+2. **Added `viz` CLI command** — matplotlib multi-panel daily chart (CGM trace, bolus/carb markers, basal step chart) modeled after the Tandem t:connect app.
+3. **Verified Mar 18 and Mar 19 data** against the Tandem app. Identified 6 data issues and documented domain knowledge in DATA_NOTES.md.
+4. **Explored the tconnectsync event model deeply** — decoded alarm/alert types, CGM backfill mechanism, bolus source classification.
+
+### Files Created/Modified
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `ingestion/fetch.py` | Modified | Added `run_day_fetch(date_str)` |
+| `ingestion/__init__.py` | Modified | Exports `run_day_fetch` |
+| `main.py` | Modified | Added `fetch-day` and `viz` subcommands |
+| `scripts/daily_viz.py` | Created | Multi-panel daily visualization |
+| `docs/operating_docs/DATA_ISSUES.md` | Created | 6 pipeline issues with include/exclude recommendations |
+| `docs/operating_docs/DATA_NOTES.md` | Created | Domain knowledge from user for detection engine |
+
+### Test Status
+```
+48 passed, 1 skipped, 0 failed
+```
+No new tests were added this session (exploratory work only).
+
+---
+
+## Pipeline Architecture
 
 ```
 tconnectsync API → ingestion/client.py → ingestion/builders.py → ingestion/storage.py
                                                                   (data/processed/*.parquet)
 ```
 
-### Files Created
+### File Inventory
 
 | File | Purpose |
 |------|---------|
 | `config/user_config.yaml` | All thresholds and settings (timezone, bg_targets, meal_detection, etc.) |
-| `ingestion/__init__.py` | Package exports: `run_full_fetch`, `run_incremental_fetch`, `clean_all` |
+| `ingestion/__init__.py` | Package exports: `run_full_fetch`, `run_incremental_fetch`, `run_day_fetch`, `clean_all` |
 | `ingestion/client.py` | API auth, multi-pump metadata, chunked event fetching with error handling |
 | `ingestion/builders.py` | 6 DataFrame builders + `build_all` router |
 | `ingestion/storage.py` | Parquet read/write, dedup (concat-then-dedup), fetch state tracking |
-| `ingestion/fetch.py` | Orchestrator: full fetch, incremental fetch, per-pump processing |
-| `main.py` | CLI: `fetch`, `fetch --clean`, `update`, `check --date YYYY-MM-DD` |
+| `ingestion/fetch.py` | Orchestrator: full fetch, incremental fetch, day fetch, per-pump processing |
+| `main.py` | CLI: `fetch`, `fetch --clean`, `fetch-day`, `update`, `check`, `viz` |
 | `scripts/sanity_check.py` | Human-readable day summary from parquet files |
+| `scripts/daily_viz.py` | Multi-panel matplotlib chart (CGM, bolus, basal) |
 | `tests/test_builders.py` | 34 unit tests for all builders |
 | `tests/test_storage.py` | 7 parquet/dedup/state tests |
 | `tests/test_suspension.py` | 7 suspension pairing edge-case tests |
 | `tests/test_integration.py` | Skeleton gated behind `@pytest.mark.integration` |
 
-### Files Deleted
-- `ingestion/tconnect.py` — was broken (string literal instead of os.getenv)
-
----
-
-## DataFrames Produced
+### DataFrames Produced
 
 | Name | Parquet | Key Columns | Notes |
 |------|---------|-------------|-------|
@@ -45,155 +65,90 @@ tconnectsync API → ingestion/client.py → ingestion/builders.py → ingestion
 | requests | `requests.parquet` | timestamp, bolus_id, carbs_g, bg_mgdl, iob, bolus_source, food_insulin, correction_insulin, total_requested, pump_serial | carbs_g is RAW (not /1000). bolus_source: "auto"/"user"/"override"/"unknown" |
 | basal | `basal.parquet` | timestamp, commanded_rate, rate_source, pump_serial | commanded_rate = commandedRate/1000 (u/hr). rate_source: "profile"/"algorithm"/"temp_rate"/etc |
 | suspension | `suspension.parquet` | suspend_timestamp, resume_timestamp, duration_minutes, suspend_reason, insulin_at_suspend, pairing_suspect, pump_serial | Paired chronologically. pairing_suspect=True if >24h or double-suspend |
-| events | `events.parquet` | timestamp, event_type, event_subtype, previous_mode, details, seqnum, pump_serial | Catch-all. Types: site_change, cgm_session, mode_change, pcm_change, daily_marker |
+| events | `events.parquet` | timestamp, event_type, event_subtype, previous_mode, details, seqnum, pump_serial | Types: site_change, cgm_session, mode_change, pcm_change, daily_marker |
 
----
+### Key Design Decisions
 
-## Test Status (Last Run)
-
-```
-48 passed, 1 skipped, 0 failed
-```
-
-The 1 skipped is `test_integration.py::TestIntegrationPipeline::test_single_day_fetch` — intentionally skipped until real reference data is captured.
-
----
-
-## Pipeline Tested End-to-End
-
-A test run was done against the current pump (serial 1513861) for `2026-03-22`. Output from `uv run python main.py check --date 2026-03-22`:
-
-```
-CGM readings: 122
-  Mean BG: 152 mg/dL | Min/Max: 96/199 | TIR: 68% | Coverage: 42%
-
-Boluses: 4  (Total: 27.28u)
-  03:59  3.00u  | 10:04  11.67u  | 12:21  1.90u  | 12:46  10.71u
-
-Bolus requests: 4  |  Meals (carbs > 0): 2  (Total: 90g)
-  09:59  45g  BG=132  source=user
-  12:42  45g  BG=0  source=user
-
-Basal: 156 entries  |  22.94u  (algorithm: 145, profile: 11)
-TDD: 50.22u  (bolus=27.28 + basal=22.94)
-
-Suspensions: 0
-
-Mode changes: 2
-  00:00  normal → sleeping
-  07:01  sleeping → normal
-```
-
-Coverage is 42% because March 22 data only runs to 13:09 (the last upload time per pump metadata).
-
-**Note:** The test parquet data was cleaned up after verification — `data/processed/` is currently empty.
-
----
-
-## Known Unhandled Event Types
-
-After running against real data, two previously-unseen event types appeared:
-- `LidDailyBasal` — daily basal summary event (intentionally not surfaced in any DataFrame)
-- `LidCarbsEntered` — manual carb entry event (not used — carbs come from bolus requests)
-- `RawEvent` — base class for events tconnectsync can't fully parse
-
-All three are now in `_HANDLED_TYPES` in `builders.py` so they don't trigger warnings.
-
----
-
-## What Remains: Verification with User
-
-### Next Steps (in priority order)
-
-1. **Full initial fetch across all 6 pumps**
-   ```bash
-   uv run python main.py fetch
-   ```
-   This will take 10-30 minutes. Expect ~16K events/day × 1900 days across all pumps. The fetch state in `data/processed/.fetch_state.json` will track progress; if interrupted, `uv run python main.py update` will retry failed chunks.
-
-2. **User sanity check**
-   ```bash
-   uv run python main.py check --date YYYY-MM-DD
-   ```
-   User picks a day from the last week they remember well and verifies:
-   - Bolus count and total insulin match their memory
-   - Carb totals match meals they ate
-   - BG pattern looks right (high morning, crashed afternoon, etc.)
-   - Any site changes / mode changes match their recollection
-
-3. **Capture integration test reference data**
-   Once a day is verified as correct, record the exact values in `tests/test_integration.py` so future pipeline changes can be regression-tested.
-
-4. **Run `uv run pytest`** on the full test suite after first real fetch to confirm no regressions.
-
----
-
-## Key Design Decisions (Revisitable)
-
-All documented in the plan at `/Users/ashtonmeyer-bibbins/.claude/plans/toasty-rolling-noodle.md`. Most important:
-
-- **Pump overlap**: Fetch all date ranges, dedup by content. Old pumps with pre-loaded dates but no actual events return zero rows naturally. See "Pump Overlap Strategy" section in the plan.
+- **Pump overlap**: Fetch all date ranges, dedup by content. Old pumps with pre-loaded dates but no actual events return zero rows naturally.
 - **events dedup key**: `(pump_serial, seqNum)` — seqNum is globally unique per pump (uint32 counter), not per-event-type.
-- **carbamount**: Raw value = grams. Do NOT divide by 1000. (Verified against CSV in prior session.)
+- **carbamount**: Raw value = grams. Do NOT divide by 1000. (Verified against CSV.)
 - **commandedRate**: milliunits/hr. Divide by 1000. Mean ~1396 → 1.396 u/hr matches pump profile.
+- **`BG=0` in requests**: Means "missing BG", not actual glucose of 0. Detection engine must treat as null.
+- **`requests_df` key is `"requests"`** (not `"request"`) — was a bug in an earlier session, now fixed.
 
 ---
 
-## Catches & Surprises from Real Data
+## Where Things Are
 
-### 1. RawEvent volume is high (~77% of events)
-In the test run (2139 total events for one day), **1644 were `RawEvent`** — the tconnectsync base class for events it couldn't parse into a typed subclass. These are silently skipped. This is expected: the tconnectsync library has a `DEFAULT_EVENT_IDS` filter and a lot of pump events fall outside those IDs. We added `RawEvent` to `_HANDLED_TYPES` to suppress warnings, but if the detection engine ever needs an event type that's currently parsing as `RawEvent`, you'd need to add it to the tconnectsync event parser or handle the raw bytes directly.
-
-### 2. `fetch_all_event_types=True` in client.py
-The API call in `client.py` uses `fetch_all_event_types=True`, which bypasses tconnectsync's `DEFAULT_EVENT_IDS` filter and fetches the full binary blob. This is intentional — it means we're getting *everything* from the API and letting `build_all` decide what to do with it. If `fetch_all_event_types=False` were used instead, some event types (like `LidAaUserModeChange`) might not come back at all.
-
-### 3. Cross-pump CGM dedup is NOT yet implemented
-The plan mentioned deduplicating CGM across pumps on `(timestamp, bg_mgdl)`. This was **not implemented**. Currently `build_cgm_df` deduplicates within a single pump call on `timestamp` only, and `storage.py` deduplicates on `(timestamp, pump_serial)`. If two different pumps uploaded the same CGM reading (same timestamp, same BG), both would survive into the final parquet with different `pump_serial` values. This is a low-risk gap (CGM comes from the sensor, not the pump, but each pump gets a copy on upload) — but worth addressing during the initial full-fetch verification.
-
-### 4. `BG=0` appears in bolus requests
-In the test run, one meal bolus (`carbs_g=45` at 12:42) had `bg_mgdl=0`. This is a real API value, not a parsing error — it means the user didn't have a BG reading at the time of bolusing (or the pump had no recent CGM value). The detection engine must treat `bg_mgdl=0` in `requests_df` as "missing BG", not as an actual glucose of 0.
-
-### 5. Unpaired suspend has `pairing_suspect=False` — potentially misleading
-An unpaired suspend at end-of-data is stored with `resume_timestamp=NaT`, `duration_minutes=NaN`, and `pairing_suspect=False`. The `False` flag means "we don't think this is a pairing error" — but it does mean there's no resume. A downstream consumer querying `WHERE pairing_suspect=False AND resume_timestamp IS NOT NULL` would miss these. Consider whether to add a separate `unpaired` boolean column, or flip `pairing_suspect=True` for unpaired suspends.
-
-### 6. `insulin_at_suspend` meaning is unverified
-The `insulinamount` field on `LidPumpingSuspended` is documented in tconnectsync as "units" but it's unclear if this is insulin remaining in cartridge, IOB, or something else. Needs validation during the real-data sanity check.
-
-### 7. `basal_df` doesn't include `profile_rate` or `algorithm_rate`
-`LidBasalDelivery` has `profileBasalRate`, `algorithmRate`, and `tempRate` fields (all in milliunits/hr) in addition to `commandedRate`. Currently only `commandedRate` (as `commanded_rate`) and `commandedRateSourceRaw` (as `rate_source`) are stored. For meal detection, the signal "CIQ is ramping up above the scheduled rate" requires comparing `commanded_rate` to `profile_rate`. Either add these columns to `basal_df`, or derive them from `user_config.yaml` pump settings at analysis time. This is a gap for the detection engine.
-
-### 8. `requests_df` key is `"requests"` (not `"request"`)
-This was a bug caught mid-session: `build_all` originally returned key `"request"` but `storage.py` expected `"requests"`. Fixed in the final code. Mentioning it because test mocks or downstream consumers that hardcode `"request"` will silently fail.
+- **`data/processed/`** has parquet files for Mar 16-21 (fetched via `fetch-day --date 2026-03-19` which pulls a ±1 day window, so 3 days of data landed)
+- **`docs/operating_docs/DATA_ISSUES.md`** — 6 issues, all with clear "Include in pipeline: YES/NO" recommendations. Read this before making any builder changes.
+- **`docs/operating_docs/DATA_NOTES.md`** — Domain knowledge from the user. Not derivable from code. Read this before building the detection engine.
 
 ---
 
-## Architecture Notes for Detection Engine
-
-The detection engine (not yet built) will consume these parquet files. Critical constraints:
-- **Source-agnostic**: Detection operates on normalized DataFrames, not raw events
-- **Trailing window only**: No future BG context in real-time mode
-- **Config-driven**: All thresholds read from `config/user_config.yaml` at runtime
-- `rate_source` in `basal_df` is the key signal for "is CIQ actively adjusting?" vs. "scheduled program running"
-- `bolus_source` in `requests_df` distinguishes auto-correction boluses from user-initiated meals
-
----
-
-## How to Run
+## CLI Commands
 
 ```bash
-# Initial full fetch (all 6 pumps, all history)
-uv run python main.py fetch
-
-# Incremental update (new data since last fetch)
-uv run python main.py update
-
-# Sanity check a specific day
-uv run python main.py check --date 2026-03-20
-
-# Run tests
-uv run pytest
-uv run pytest -m "not integration"   # unit tests only
-
-# Wipe and re-fetch from scratch
-uv run python main.py fetch --clean
+uv run python main.py fetch                    # Full fetch, all 6 pumps, all history (10-30 min)
+uv run python main.py fetch --clean             # Wipe data/processed/ then full fetch
+uv run python main.py fetch-day --date YYYY-MM-DD  # Single day, active pump only (~4 sec)
+uv run python main.py update                    # Incremental since last fetch
+uv run python main.py check --date YYYY-MM-DD   # Text summary of a day
+uv run python main.py viz --date YYYY-MM-DD     # Visual chart of a day (plt.show)
 ```
+
+---
+
+## Gotchas & Things Learned Working With the API
+
+These are things I discovered through trial and error that aren't documented elsewhere:
+
+### 1. tconnectsync event class names are inconsistent
+- The class is `LidBolusRequestedMsg1`, not `LidBolusRequestMsg1` (note the `ed`). Will give an `ImportError` if you get it wrong.
+- `optionsRaw` is on **Msg2**, not Msg1 or Msg3. `carbamount`, `BG`, `IOB` are on Msg1. `foodbolussize`, `correctionbolussize`, `totalbolussize` are on Msg3.
+
+### 2. CGM event field names
+- The BG value field is `currentglucosedisplayvalue`, not `bgReading` or `bg` or `glucose`.
+- `cgmDataTypeRaw` and `egvTimestamp` are on the CGM event object but not used by our builder yet. These are critical for the backfill fix (Issue #5).
+
+### 3. tconnectsync enum warnings are noisy but harmless
+- Many `dalertidRaw` values (1, 2, 3, 6, 8) are unmapped in tconnectsync's enum and produce stderr warnings like `"2 is not a valid LidCgmAlertActivatedDex.DalertidEnum"`. The events still parse fine — the `.dalertid` property just returns `None`. Use `.dalertidRaw` (the int) instead.
+- Suppress with `warnings.filterwarnings('ignore')` or `2>/dev/null` when querying bulk data.
+
+### 4. Alarm/alert attributes vary by class
+- `LidAlarmActivated` has `alarmidRaw`, `alarmid`, `param1`, `param2`
+- `LidAlarmCleared` has `alarmidRaw`, `alarmid` but **no** `param1`/`param2`
+- Same pattern for `LidAlertActivated` vs `LidAlertCleared`
+- Always use `hasattr()` before accessing `param1`/`param2`
+
+### 5. The active pump is the last in the sorted metadata list
+- `get_pump_metadata(api)` returns pumps sorted by `minDateWithEvents` (oldest first)
+- The current/active pump is `metadata[-1]` (serial 1513861)
+
+### 6. `LidUsbConnected` and `LidUsbDisconnected` are unhandled
+- These appeared during real data fetch but aren't in `_HANDLED_TYPES`. They trigger builder warnings. Harmless — just USB cable events. Add to `_HANDLED_TYPES` to suppress.
+
+### 7. Bolus source classification is binary
+- `optionsRaw=3` + `bolustypeRaw=2` = auto correction (every time). `optionsRaw=0` + `bolustypeRaw=1` = user-initiated (every time). No `optionsRaw=6` observed. The split is perfectly clean — `bolustypeRaw` alone would suffice.
+- Override is a sub-classification within user-initiated: `useroverrideRaw=1` on Msg2.
+
+### 8. Suspension alarm correlation is by exact timestamp
+- `LidAlarmActivated` fires at the **exact same timestamp** as `LidPumpingSuspended` when the alarm causes the suspension. Match on timestamp to enrich suspensions with alarm names.
+
+---
+
+## Priority Work for Next Session
+
+### Must-do (pipeline fixes, in order)
+1. **Build `alarms.parquet`** — New builder for `LidAlarmActivated/Cleared`, `LidAlertActivated/Cleared`, `LidCgmAlertActivatedDex/Cleared/Ack`. See DATA_ISSUES #2, #4, #6 for the full type map and column schema.
+2. **Fix CGM backfill** — Update `build_cgm_df` to preserve `cgmDataTypeRaw=2` readings. See DATA_ISSUES #5 for the exact fix. This recovers 30% of CGM data.
+3. **Fix stale CGM readings** — Drop readings <60s apart in `build_cgm_df`. See DATA_ISSUES #1.
+4. **Enrich suspensions with alarm name** — Timestamp-match `LidAlarmActivated` to `LidPumpingSuspended` in `build_suspension_df`. See DATA_ISSUES #3.
+
+### Should-do
+5. **Full historical fetch** — `uv run python main.py fetch` across all 6 pumps. Needed before any real analysis.
+6. **Add `LidUsbConnected`/`LidUsbDisconnected` to `_HANDLED_TYPES`** — Suppresses warnings.
+7. **Capture integration test reference data** — Pick a verified day, record exact values in `tests/test_integration.py`.
+
+### User needs to provide
+- Cartridge fill amount threshold for distinguishing real vs forced site changes (DATA_NOTES #2)
