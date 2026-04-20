@@ -31,7 +31,7 @@ DEDUP_KEYS: dict[str, list[str]] = {
     "basal": ["timestamp", "pump_serial"],
     "suspension": ["suspend_timestamp", "pump_serial"],
     "events": ["pump_serial", "seqnum"],
-    "alarms": ["pump_serial", "seqnum"],
+    "alarms": ["seqnum", "pump_serial"],
 }
 
 
