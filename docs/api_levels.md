@@ -135,7 +135,7 @@ from tconnectsync.eventparser.events import LidBolusRequestedMsg1
 requests = [e for e in events if isinstance(e, LidBolusRequestedMsg1)]
 
 e = requests[0]
-print(e.eventTimestamp, "carbs:", e.carbamount/1000, "g", "BG:", e.BG, "mg/dL")
+print(e.eventTimestamp, "carbs:", e.carbamount, "g", "BG:", e.BG, "mg/dL")  # carbamount is raw grams; no /1000 needed
 ```
 
 ---
@@ -170,7 +170,7 @@ bolus_df.head()
 ```python
 request_df = pd.DataFrame([{
     'timestamp': e.eventTimestamp.datetime,
-    'carbs_g': e.carbamount / 1000,
+    'carbs_g': e.carbamount,  # carbamount is raw grams; no /1000 needed
     'bg_mgdl': e.BG,
     'iob': e.iob,
 } for e in requests])

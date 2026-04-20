@@ -286,7 +286,7 @@ LidCgmDataFsl2   # FreeStyle Libre 2
 **Bolus Events:**
 ```python
 LidBolusRequestedMsg1
-    .carbamount: int          # mg (divide by 1000 for grams)
+    .carbamount: int          # grams, ready to use (do NOT ÷1000 — verified against CSV)
     .BG: int                  # mg/dL
     .iob: float
 

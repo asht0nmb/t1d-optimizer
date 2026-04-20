@@ -2,6 +2,8 @@
 
 Findings from real-data verification against the Tandem t:connect app.
 
+> **2026-04-20 update:** All 6 issues below are resolved in the current pipeline. See commit SHAs on each item. Issue #5's timestamp recommendation was superseded by `DATA_NOTES_2.md`.
+
 ---
 
 ## 1. Stale CGM readings on sensor reconnection
@@ -28,7 +30,7 @@ Findings from real-data verification against the Tandem t:connect app.
 
 **Fix needed:** Filter CGM readings in `build_cgm_df` to drop entries that are <60 seconds apart from an adjacent reading, keeping the first. Current dedup is exact-timestamp only.
 
-**Status:** Noted, not yet fixed.
+**Status: Resolved in `ee80fca`.** `build_cgm_df` now drops live readings that arrive <60 s after an adjacent reading (keeping the first); backfilled rows are exempt from the filter since they legitimately arrive out of order. The same commit also added `LidUsbConnected`/`LidUsbDisconnected` handling so pump connect/disconnect events no longer trigger unknown-event warnings.
 
 ---
 
@@ -69,7 +71,7 @@ Findings from real-data verification against the Tandem t:connect app.
 
 **Include in pipeline: YES — critical.** Alarms and alerts directly affect insulin delivery (suspensions, basal reversion, incomplete boluses). Without them, the detection engine can't distinguish "pump chose not to deliver" from "pump was physically unable to deliver." Build into a new `alarms.parquet` with columns: timestamp, category (`alarm`/`alert`/`cgm_alert`), action (`activated`/`cleared`), alarm_id, alarm_name, param1, param2, pump_serial.
 
-**Status:** Noted, not yet fixed.
+**Status: Resolved in `414432c`.** `alarms.parquet` is now built from `LidAlarmActivated/Cleared`, `LidAlertActivated/Cleared`, and `LidCgmAlertActivatedDex/ClearedDex` with the full schema described above (timestamp, category, action, alarm_id, alarm_name, param1, param2, pump_serial). Downstream viz (`c6320d8`) renders alarm and alert markers on the daily CGM trace.
 
 ---
 
@@ -98,7 +100,7 @@ This replaces the generic `suspend_reason=alarm` with actionable information lik
 
 **Include in pipeline: YES — enrich existing suspensions.** Not a new DataFrame, just additional columns on `suspension.parquet`. The alarm name turns a generic "alarm" suspension into clinically actionable data (occlusion vs battery death vs auto-off are very different situations).
 
-**Status:** Noted, not yet fixed.
+**Status: Resolved in `ee80fca`.** `build_suspension_df` now cross-references `LidAlarmActivated` events at the same timestamp and populates `alarm_id` and `alarm_name` columns on `suspension.parquet`, so `reason=alarm` suspensions are distinguishable (e.g., `occlusion` vs `battery_shutdown`).
 
 ---
 
@@ -136,7 +138,7 @@ Map during building:
 - alertidRaw=51 → `"low_bg_alert"` (pump-side)
 - All dalertidRaw values above → named CGM alerts with thresholds
 
-**Status:** Noted, not yet fixed.
+**Status: Resolved in `414432c`.** The alarms builder applies the full name map above when writing `alarms.parquet`: pump-side `alertidRaw` 50/51 become `high_bg_alert`/`low_bg_alert`, and unmapped CGM `dalertidRaw` values (1, 2, 3, 6, 8, 14) are named `cgm_urgent_low`, `cgm_high`, `cgm_low`, `cgm_rise_rate`, `cgm_fall_rate`, and `cgm_out_of_range` respectively.
 
 ---
 
@@ -157,7 +159,7 @@ This is distinct from the pump being dead (BatteryShutdownAlarm). During out-of-
 
 **Include in pipeline: YES — critical.** These episodes define windows where Control-IQ is blind. They belong in `alarms.parquet` as paired activated/cleared rows (same as other alarms), but the detection engine should also derive a convenience view of out-of-range windows with start/end/duration for cross-referencing against basal and CGM data.
 
-**Status:** Noted, not yet fixed.
+**Status: Resolved in `414432c` (capture) and `c6320d8` (viz).** `alarms.parquet` now contains paired activated/cleared rows for `dalertidRaw=14` with `alarm_name="cgm_out_of_range"`, and `daily_viz` renders these windows as gray spans on the CGM trace. **Future enhancement:** a dedicated out-of-range episode view (start/end/duration derived from activated→cleared pairs) is not yet built; the detection engine currently has to derive episodes from the paired rows itself.
 
 ---
 
@@ -191,4 +193,6 @@ This is distinct from the pump being dead (BatteryShutdownAlarm). During out-of-
 
 **Include in pipeline: YES — 30% of all CGM data.** These readings are real sensor measurements. Dropping them creates false gaps and distorts daily statistics.
 
-**Status:** Noted, not yet fixed.
+**Status: Resolved in `35041db` (supersedes `ec6d18f`).** `build_cgm_df` now preserves `cgmDataTypeRaw=2` rows (dedup key includes `seqNum`/`egvTimestamp`) and adds a `backfilled` boolean column; backfilled readings are also exempt from the <60 s stale filter from Issue #1.
+
+**Correction:** The timestamp recommendation in the box above (use `eventTimestamp` as primary, store `egvTimestamp` as `sensor_timestamp`) was **reversed** by `35041db`. See `docs/operating_docs/DATA_NOTES_2.md` for the rationale. In the shipped pipeline, backfilled readings use `egvTimestamp` (sensor time, when the reading was actually taken) as the primary `timestamp`, and `sensor_timestamp` stores `eventTimestamp` (the pump-received time). Live readings (`cgmDataTypeRaw=1`) are unchanged — they still use `eventTimestamp`.
