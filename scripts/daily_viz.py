@@ -153,6 +153,7 @@ def daily_viz(date_str: str) -> None:
     basal = _filter_day(load_df("basal"), target)
     suspension = _filter_day(load_df("suspension"), target, ts_col="suspend_timestamp")
     events = _filter_day(load_df("events"), target)
+    alarms = _filter_day(load_df("alarms"), target)
 
     if cgm.empty:
         print(f"No CGM data for {target}. Run: uv run python main.py fetch-day --date {date_str}")
@@ -212,36 +213,53 @@ def daily_viz(date_str: str) -> None:
     ax_cgm.text(day_end, high, f" {high}", va="center", fontsize=8, color=C_HIGH_LINE, fontweight="bold")
     ax_cgm.text(day_end, low, f" {low}", va="center", fontsize=8, color=C_LOW_LINE, fontweight="bold")
 
-    # Plot CGM with color segments
+    # Plot CGM with color segments (gap-aware, backfill-styled)
     times = cgm["_plot_time"].values
     bgs = cgm["bg_mgdl"].values
+    backfilled = cgm["backfilled"].astype(bool).values if "backfilled" in cgm.columns else np.zeros(len(bgs), dtype=bool)
+
+    def _bg_color(val):
+        if val < low or val > 250:
+            return C_RED
+        elif val > high:
+            return C_ORANGE
+        return C_GREEN
 
     for i in range(len(times) - 1):
-        bg_val = bgs[i]
-        if bg_val < low or bg_val > 250:
-            color = C_RED
-        elif bg_val > high:
-            color = C_ORANGE
-        else:
-            color = C_GREEN
+        t0, t1 = times[i], times[i + 1]
+        # Don't draw lines across gaps > 15 min
+        if isinstance(t0, datetime) and isinstance(t1, datetime):
+            if (t1 - t0).total_seconds() > 900:
+                continue
 
-        # Line segment
+        color = _bg_color(bgs[i])
+        is_bf = bool(backfilled[i]) or bool(backfilled[i + 1])
         ax_cgm.plot(
-            [times[i], times[i + 1]], [bgs[i], bgs[i + 1]],
-            color=color, linewidth=1.5, solid_capstyle="round",
+            [t0, t1], [bgs[i], bgs[i + 1]],
+            color=color,
+            linewidth=1.0 if is_bf else 1.5,
+            linestyle="--" if is_bf else "-",
+            alpha=0.4 if is_bf else 1.0,
+            solid_capstyle="round",
         )
 
-    # Scatter dots on top
-    colors = []
-    for v in bgs:
-        if v < low or v > 250:
-            colors.append(C_RED)
-        elif v > high:
-            colors.append(C_ORANGE)
-        else:
-            colors.append(C_GREEN)
+    # Scatter dots — live vs backfilled
+    colors = np.array([_bg_color(v) for v in bgs])
+    live_mask = ~backfilled
+    bf_mask = backfilled
 
-    ax_cgm.scatter(times, bgs, c=colors, s=12, zorder=5, edgecolors="none")
+    if live_mask.any():
+        ax_cgm.scatter(
+            times[live_mask], bgs[live_mask],
+            c=colors[live_mask],
+            s=12, zorder=5, edgecolors="none",
+        )
+    if bf_mask.any():
+        ax_cgm.scatter(
+            times[bf_mask], bgs[bf_mask],
+            c=colors[bf_mask],
+            s=8, zorder=4, edgecolors="none", alpha=0.5,
+        )
 
     # Peak labels
     peaks = _find_peaks(cgm)
@@ -257,6 +275,50 @@ def daily_viz(date_str: str) -> None:
                 color=p["color"],
                 ha="center",
             )
+
+    # Alarm markers on CGM panel
+    if not alarms.empty:
+        # Major alarms: vertical lines
+        _MAJOR_ALARM_LABELS = {
+            "BatteryShutdownAlarm": "Battery",
+            "OcclusionAlarm": "Occlusion",
+            "PumpResetAlarm": "Reset",
+            "EmptyCartridgeAlarm": "Empty",
+            "CartridgeAlarm": "Cartridge",
+        }
+        major = alarms[
+            (alarms["category"] == "alarm")
+            & (alarms["action"] == "activated")
+            & (alarms["alarm_name"].isin(_MAJOR_ALARM_LABELS))
+        ]
+        for _, row in major.iterrows():
+            ts = pd.to_datetime(row["timestamp"])
+            t = datetime(2000, 1, 1, ts.hour, ts.minute, ts.second)
+            label = _MAJOR_ALARM_LABELS.get(row["alarm_name"], row["alarm_name"])
+            ax_cgm.axvline(x=t, color=C_RED, linewidth=0.8, linestyle="--", alpha=0.6)
+            ax_cgm.annotate(
+                label, xy=(t, 400), fontsize=7, color=C_RED,
+                ha="center", fontweight="bold", alpha=0.8,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=C_RED, alpha=0.7),
+            )
+
+        # CGM out-of-range spans (signal loss windows)
+        oor_act = alarms[
+            (alarms["alarm_name"] == "cgm_out_of_range") & (alarms["action"] == "activated")
+        ].sort_values("timestamp")
+        oor_clr = alarms[
+            (alarms["alarm_name"] == "cgm_out_of_range") & (alarms["action"] == "cleared")
+        ].sort_values("timestamp")
+        for _, act_row in oor_act.iterrows():
+            act_ts = pd.to_datetime(act_row["timestamp"])
+            act_t = datetime(2000, 1, 1, act_ts.hour, act_ts.minute, act_ts.second)
+            cleared_after = oor_clr[pd.to_datetime(oor_clr["timestamp"]) > act_ts]
+            if not cleared_after.empty:
+                clr_ts = pd.to_datetime(cleared_after.iloc[0]["timestamp"])
+                clr_t = datetime(2000, 1, 1, clr_ts.hour, clr_ts.minute, clr_ts.second)
+            else:
+                clr_t = day_end
+            ax_cgm.axvspan(act_t, clr_t, alpha=0.06, color="gray")
 
     # ══════════════════════════════════════════════════════════════════
     # Panel 2: Bolus + Carbs + Events
@@ -389,7 +451,7 @@ def daily_viz(date_str: str) -> None:
                     )
                     prev_rate = rate
 
-    # Suspension shading
+    # Suspension shading with alarm labels
     if not suspension.empty:
         for _, row in suspension.iterrows():
             s_start = pd.to_datetime(row["suspend_timestamp"])
@@ -400,6 +462,19 @@ def daily_viz(date_str: str) -> None:
             else:
                 s_end_t = day_end
             ax_basal.axvspan(s_start_t, s_end_t, alpha=0.3, color=C_SUSPEND, hatch="//")
+
+            # Label with alarm name or suspend reason
+            alarm_name = row.get("alarm_name", None)
+            if alarm_name and pd.notna(alarm_name):
+                label = alarm_name.replace("Alarm", "").replace("alarm", "").strip()
+            else:
+                label = row.get("suspend_reason", "")
+            if label:
+                label_t = s_start_t + timedelta(minutes=2)
+                ax_basal.annotate(
+                    label, xy=(label_t, ax_basal.get_ylim()[1] * 0.85),
+                    fontsize=7, color=C_RED, ha="left", fontweight="bold", alpha=0.8,
+                )
 
     # ── X-axis formatting ───────────────────────────────────────────
     ax_basal.set_xlim(day_start, day_end)
