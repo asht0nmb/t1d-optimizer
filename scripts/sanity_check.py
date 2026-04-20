@@ -85,7 +85,9 @@ def sanity_check(date_str: str) -> None:
             ts = pd.to_datetime(row["suspend_timestamp"]).strftime("%H:%M")
             dur = f"{row['duration_minutes']:.0f}min" if pd.notna(row["duration_minutes"]) else "ongoing"
             suspect = " [SUSPECT]" if row.get("pairing_suspect") else ""
-            print(f"    {ts}  {dur}  reason={row['suspend_reason']}{suspect}")
+            alarm = row.get("alarm_name", None)
+            alarm_str = f"  ({alarm})" if alarm and pd.notna(alarm) else ""
+            print(f"    {ts}  {dur}  reason={row['suspend_reason']}{alarm_str}{suspect}")
 
     # ── Events (mode changes, site changes) ──────────────────────
     events = _filter_day(load_df("events"), target)
@@ -105,6 +107,19 @@ def sanity_check(date_str: str) -> None:
             for _, row in site_changes.iterrows():
                 ts = pd.to_datetime(row["timestamp"]).strftime("%H:%M")
                 print(f"    {ts}  {row['event_subtype']}")
+
+    # ── Alarms ─────────────────────────────────────────────────
+    alarms = _filter_day(load_df("alarms"), target)
+    if not alarms.empty:
+        activated = alarms[alarms["action"] == "activated"]
+        print(f"\nAlarms/Alerts: {len(activated)} activated ({len(alarms)} total)")
+        for _, row in activated.iterrows():
+            ts = pd.to_datetime(row["timestamp"]).strftime("%H:%M")
+            cat = row["category"]
+            name = row["alarm_name"]
+            p1 = f"  param1={row['param1']:.0f}" if pd.notna(row.get("param1")) else ""
+            p2 = f"  param2={row['param2']:.0f}" if pd.notna(row.get("param2")) else ""
+            print(f"    {ts}  [{cat}] {name}{p1}{p2}")
 
     print(f"\n{'='*60}\n")
 
