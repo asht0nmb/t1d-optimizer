@@ -23,6 +23,7 @@ PARQUET_FILES: dict[str, str] = {
     "events": "events.parquet",
     "alarms": "alarms.parquet",
     "site_issues": "site_issues.parquet",
+    "cgm_gaps": "cgm_gaps.parquet",
 }
 
 DEDUP_KEYS: dict[str, list[str]] = {
@@ -34,6 +35,7 @@ DEDUP_KEYS: dict[str, list[str]] = {
     "events": ["pump_serial", "seqnum"],
     "alarms": ["seqnum", "pump_serial"],
     "site_issues": ["first_occlusion_ts", "pump_serial"],
+    "cgm_gaps": ["start_ts", "pump_serial"],
 }
 
 

@@ -782,3 +782,144 @@ class TestBuildSiteIssuesDf:
         # Events enrichment ran first, so the non-BatteryShutdown site_change
         # is marked forced_by_alarm=False and therefore resolves the cluster.
         assert site_issues.iloc[0]["resolved_by_site_change_ts"] == ts("11:00")
+
+
+# ---------------------------------------------------------------------------
+# Task 1.4 — build_cgm_gaps_df
+# ---------------------------------------------------------------------------
+
+class TestBuildCgmGapsDf:
+    def test_single_closed_gap(self):
+        from ingestion.enrich import build_cgm_gaps_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "activated"},
+            {"timestamp": ts("10:25"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "cleared"},
+        ])
+        out = build_cgm_gaps_df(alarms)
+        assert len(out) == 1
+        row = out.iloc[0]
+        assert row["start_ts"] == ts("10:00")
+        assert row["end_ts"] == ts("10:25")
+        assert row["duration_minutes"] == pytest.approx(25.0)
+        assert row["ongoing"] == False  # noqa: E712
+        assert row["pump_serial"] == SERIAL
+
+    def test_unclosed_gap_marked_ongoing(self):
+        from ingestion.enrich import build_cgm_gaps_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "activated"},
+        ])
+        out = build_cgm_gaps_df(alarms)
+        assert len(out) == 1
+        row = out.iloc[0]
+        assert row["start_ts"] == ts("10:00")
+        assert pd.isna(row["end_ts"])
+        assert pd.isna(row["duration_minutes"])
+        assert row["ongoing"] == True  # noqa: E712
+
+    def test_multiple_sequential_gaps(self):
+        from ingestion.enrich import build_cgm_gaps_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:00"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "activated"},
+            {"timestamp": ts("08:10"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "cleared"},
+            {"timestamp": ts("14:00"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "activated"},
+            {"timestamp": ts("14:30"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "cleared"},
+        ])
+        out = build_cgm_gaps_df(alarms)
+        assert len(out) == 2
+        assert list(out["start_ts"]) == [ts("08:00"), ts("14:00")]
+        assert list(out["end_ts"]) == [ts("08:10"), ts("14:30")]
+        assert list(out["duration_minutes"]) == [pytest.approx(10.0), pytest.approx(30.0)]
+        assert list(out["ongoing"]) == [False, False]
+
+    def test_double_activated_closes_previous(self, caplog):
+        from ingestion.enrich import build_cgm_gaps_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:00"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "activated"},
+            {"timestamp": ts("08:10"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "activated"},
+            {"timestamp": ts("08:30"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "cleared"},
+        ])
+        with caplog.at_level("WARNING"):
+            out = build_cgm_gaps_df(alarms)
+        assert len(out) == 2
+        # First gap was force-closed at the second activation's timestamp.
+        assert out.iloc[0]["start_ts"] == ts("08:00")
+        assert out.iloc[0]["end_ts"] == ts("08:10")
+        assert out.iloc[0]["duration_minutes"] == pytest.approx(10.0)
+        assert out.iloc[0]["ongoing"] == False  # noqa: E712
+        # Second gap was paired normally.
+        assert out.iloc[1]["start_ts"] == ts("08:10")
+        assert out.iloc[1]["end_ts"] == ts("08:30")
+        assert "unpaired" in caplog.text.lower() or "double" in caplog.text.lower()
+
+    def test_ignores_non_cgm_out_of_range(self):
+        from ingestion.enrich import build_cgm_gaps_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "category": "cgm_alert",
+             "alarm_name": "cgm_high", "action": "activated"},
+            {"timestamp": ts("10:05"), "category": "cgm_alert",
+             "alarm_name": "cgm_high", "action": "cleared"},
+            {"timestamp": ts("11:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        out = build_cgm_gaps_df(alarms)
+        assert out.empty
+
+    def test_empty_alarms(self):
+        from ingestion.enrich import build_cgm_gaps_df
+
+        out = build_cgm_gaps_df(_alarms_frame([]))
+        assert out.empty
+        for col in ["start_ts", "end_ts", "duration_minutes", "pump_serial", "ongoing"]:
+            assert col in out.columns
+
+    def test_none_alarms_returns_empty(self):
+        from ingestion.enrich import build_cgm_gaps_df
+
+        out = build_cgm_gaps_df(None)
+        assert out.empty
+        for col in ["start_ts", "end_ts", "duration_minutes", "pump_serial", "ongoing"]:
+            assert col in out.columns
+
+    def test_cleared_without_activated_logs_and_skips(self, caplog):
+        from ingestion.enrich import build_cgm_gaps_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "category": "cgm_alert",
+             "alarm_name": "cgm_out_of_range", "action": "cleared"},
+        ])
+        with caplog.at_level("WARNING"):
+            out = build_cgm_gaps_df(alarms)
+        assert out.empty
+        assert "unpaired" in caplog.text.lower()
+
+    def test_enrich_all_attaches_cgm_gaps_frame(self):
+        from ingestion.enrich import enrich_all
+
+        frames = {
+            "alarms": _alarms_frame([
+                {"timestamp": ts("10:00"), "category": "cgm_alert",
+                 "alarm_name": "cgm_out_of_range", "action": "activated"},
+                {"timestamp": ts("10:25"), "category": "cgm_alert",
+                 "alarm_name": "cgm_out_of_range", "action": "cleared"},
+            ]),
+        }
+        out = enrich_all(frames, config={})
+        assert "cgm_gaps" in out
+        gaps = out["cgm_gaps"]
+        assert len(gaps) == 1
+        assert gaps.iloc[0]["duration_minutes"] == pytest.approx(25.0)
