@@ -32,7 +32,7 @@ def fetch_pump_events(
     end_date: str,
     pump_serial: str,
     chunk_days: int = 30,
-) -> list:
+) -> tuple[list, str | None]:
     """
     Fetch all events for one pump in date-range chunks.
 
@@ -49,11 +49,17 @@ def fetch_pump_events(
 
     Returns:
         (events, last_successful_end) tuple where events is a flat list
-        and last_successful_end is the end date of the last successful chunk.
+        and last_successful_end is the end date of the last successful chunk
+        (or None if no chunk succeeded).
     """
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
 
+    # Consecutive chunks share a boundary date: chunk N ends on date X and
+    # chunk N+1 starts on the same date X. Whether pump_events treats
+    # max_date as inclusive or exclusive determines whether events on date X
+    # are double-counted. Downstream dedup in storage.save_df collapses any
+    # duplicates, so this is safe either way.
     chunks = []
     chunk_start = start
     while chunk_start < end:

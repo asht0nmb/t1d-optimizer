@@ -310,7 +310,7 @@ LidBolexCompleted   # Extended bolus
 **Basal Events:**
 ```python
 LidBasalDelivery             # Every 5 minutes
-    .commandedRate: float    # units/hr (from milliunits)
+    .commandedRate: float    # milliunits/hr — divide by 1000 for u/hr
     .commandedRateSource: CommandedRateSourceBitmask
 
 LidBasalRateChange
