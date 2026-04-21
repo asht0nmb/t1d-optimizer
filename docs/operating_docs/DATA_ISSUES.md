@@ -159,7 +159,7 @@ This is distinct from the pump being dead (BatteryShutdownAlarm). During out-of-
 
 **Include in pipeline: YES — critical.** These episodes define windows where Control-IQ is blind. They belong in `alarms.parquet` as paired activated/cleared rows (same as other alarms), but the detection engine should also derive a convenience view of out-of-range windows with start/end/duration for cross-referencing against basal and CGM data.
 
-**Status: Resolved in `414432c` (capture) and `c6320d8` (viz).** `alarms.parquet` now contains paired activated/cleared rows for `dalertidRaw=14` with `alarm_name="cgm_out_of_range"`, and `daily_viz` renders these windows as gray spans on the CGM trace. **Future enhancement:** a dedicated out-of-range episode view (start/end/duration derived from activated→cleared pairs) is not yet built; the detection engine currently has to derive episodes from the paired rows itself.
+**Status: Resolved in `414432c` (capture), `c6320d8` (viz), and `b8f12b6` (episode view).** `alarms.parquet` contains paired activated/cleared rows for `dalertidRaw=14` with `alarm_name="cgm_out_of_range"`, `daily_viz` renders these windows as gray spans on the CGM trace, and `build_cgm_gaps_df` (Task 1.4) now emits a dedicated `cgm_gaps.parquet` with start/end/duration so detection code consumes episodes directly instead of pairing rows itself.
 
 ---
 

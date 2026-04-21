@@ -231,7 +231,13 @@ Additional Msg2 fields: `declinedcorrectionRaw` (0=no, 1=user declined correctio
 | pump_serial | str | | |
 | forced_by_alarm | bool / NA | derived (enrichment) | Only populated for `event_type == "site_change"` (NaN / None otherwise). `True` when a site_change falls within `site_change_detection.forced_window_minutes` of an activated `BatteryShutdownAlarm` — i.e. the fill is firmware-forced, not a real site rotation. Override: a `cartridge` subtype whose `details.insulin_volume >= site_change_detection.cartridge_real_fill_threshold` is treated as a genuine site change (`False`) even inside the window. See DATA_NOTES §2. |
 
-**`site_issues_df`** — Suspected site-failure episodes derived from `alarms_df` (enrichment helper; see DATA_NOTES §1)
+### 3.6 Enriched tables
+
+Derived frames produced by `ingestion/enrich.py` on top of the normalized frames in §3.5. These are not direct projections of API events — each is the output of a builder that consumes one or more normalized frames plus config. They are persisted alongside the normalized parquets and are what downstream consumers (sanity_check, daily_viz, detection) actually load.
+
+For the broader column-level enrichments that attach to §3.5 frames themselves (`requests.bolus_category`, `requests.override_delta`, `events.forced_by_alarm`), see the corresponding columns in §3.5 and DATA_NOTES §2–§3.
+
+**`site_issues_df`** — Suspected site-failure episodes clustered from `alarms_df` (see DATA_NOTES §1)
 
 | Column | Type | Source | Notes |
 |---|---|---|---|
@@ -244,9 +250,11 @@ Additional Msg2 fields: `declinedcorrectionRaw` (0=no, 1=user declined correctio
 
 Clustering rule: activated occlusions are grouped while the gap to the previous activation is `<= site_change_detection.occlusion_cluster_window_minutes`; a larger gap starts a new cluster. Only clusters meeting `min_occlusions_for_cluster` are emitted.
 
+Resolution lookup requires `events_df` to already carry `forced_by_alarm` (i.e. `enrich_events_df` has run). If the column is absent, `build_site_issues_df` falls back to treating every `site_change` as a valid resolver — a conservative default that over-resolves clusters rather than silently dropping them. The enrich pipeline (§3.7) orders the steps correctly so this fallback only matters for ad-hoc callers.
+
 Dedup key: `["first_occlusion_ts", "pump_serial"]`. Persisted to `data/processed/site_issues.parquet`.
 
-**`cgm_gaps_df`** — CGM out-of-range episodes derived from `alarms_df` (enrichment helper; see DATA_ISSUES #6)
+**`cgm_gaps_df`** — CGM out-of-range episodes paired from `alarms_df` (see DATA_ISSUES #6)
 
 | Column | Type | Source | Notes |
 |---|---|---|---|
@@ -261,6 +269,19 @@ Pairing rule: iterate `alarm_name == "cgm_out_of_range"` rows sorted by timestam
 Detection code uses these windows to exclude periods where Control-IQ had no CGM signal (and therefore couldn't adjust basal / deliver auto-corrections) from trend and anomaly analysis.
 
 Dedup key: `["start_ts", "pump_serial"]`. Persisted to `data/processed/cgm_gaps.parquet`.
+
+### 3.7 Enrichment pipeline
+
+Enrichment is a pure in-memory transform layer that runs inside `build_all(events, serial, config)` after the normalized-frame builders finish but before `storage.save_df` is called. Passing `config=None` skips enrichment (back-compat for raw-frame tests); the production `fetch` / `fetch-day` / `update` paths always pass the loaded config, so downstream consumers (`sanity_check`, `daily_viz`, detection) always see enriched frames on disk.
+
+The top-level orchestrator is `enrich_all(frames, config)` in `ingestion/enrich.py`. It runs the four enrichment steps in this order:
+
+1. **`enrich_requests_df(requests)`** — derives `bolus_category` and `override_delta` columns on `requests_df` (§3.5). Pure per-row transform; no cross-frame dependencies.
+2. **`enrich_events_df(events, alarms, site_cfg)`** — adds the `forced_by_alarm` column to `events_df` (§3.5) by cross-referencing `BatteryShutdownAlarm` activations in `alarms_df` and, for `cartridge` subtypes, parsing `details.insulin_volume` against the `cartridge_real_fill_threshold` override.
+3. **`build_site_issues_df(alarms, events, site_cfg)`** — produces `site_issues_df` (§3.6). Runs after step 2 so that `forced_by_alarm` is available to distinguish real site rotations from firmware-forced refills when looking for a cluster's resolver.
+4. **`build_cgm_gaps_df(alarms)`** — produces `cgm_gaps_df` (§3.6). Depends only on `alarms_df`, so ordering versus the others is not load-bearing.
+
+All four functions are side-effect-free: no API calls, no I/O, no config mutation. Missing input frames are tolerated (callers may pass partial dicts for testing). Tunables live under the `site_change_detection` block in `config/user_config.yaml`; see that file for the four keys (`forced_window_minutes`, `cartridge_real_fill_threshold`, `occlusion_cluster_window_minutes`, `min_occlusions_for_cluster`).
 
 ---
 

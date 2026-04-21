@@ -152,3 +152,74 @@ These are things I discovered through trial and error that aren't documented els
 
 ### User needs to provide
 - Cartridge fill amount threshold for distinguishing real vs forced site changes (DATA_NOTES #2)
+
+---
+
+# Handoff: Session 5 — Enrichment Layer
+
+**Date:** 2026-04-21
+**Status:** Enrichment layer complete. All 4 planned enrichments landed on `feat/enrichment-detection-v1`. Ready to start Phase 2 (Detection Engine v1).
+
+## What Shipped
+
+Four commits on `feat/enrichment-detection-v1` (above main), implementing Tasks 1.1–1.4 of `docs/plans/2026-04-20-enrichment-and-detection-v1.md`:
+
+| SHA | Task | Summary |
+|---|---|---|
+| `861379d` | 1.1 | `enrich_requests_df` — adds `bolus_category` and `override_delta` to `requests.parquet` |
+| `ae2059f` | 1.2 | `enrich_events_df` — adds `forced_by_alarm` to `events.parquet` for site_change rows |
+| `54bb609` | 1.3 | `build_site_issues_df` — clusters `OcclusionAlarm` activations into a new `site_issues.parquet` |
+| `b8f12b6` | 1.4 | `build_cgm_gaps_df` — pairs `cgm_out_of_range` activations/cleared rows into a new `cgm_gaps.parquet` |
+
+All four are wired through `enrich_all(frames, config)` in `ingestion/enrich.py`, which is invoked from `builders.build_all` whenever a config dict is passed. The production `fetch` / `fetch-day` / `update` paths always pass config, so downstream consumers see enriched frames on disk. See `docs/DATA_CATALOG.md` §3.6 (Enriched tables) and §3.7 (Enrichment pipeline) for the column-level schema and step ordering.
+
+## Updated Frame Inventory
+
+| Parquet | Status | Notes |
+|---|---|---|
+| `cgm.parquet` | unchanged | Live + backfilled CGM (see DATA_ISSUES #5). |
+| `bolus.parquet` | unchanged | Completed boluses. |
+| `requests.parquet` | **enriched** | Now carries `bolus_category` + `override_delta` (Task 1.1). |
+| `basal.parquet` | unchanged | |
+| `suspension.parquet` | unchanged | Still carries `alarm_id` / `alarm_name` from the earlier suspension-enrichment (DATA_ISSUES #3). |
+| `events.parquet` | **enriched** | Site_change rows now carry `forced_by_alarm` (Task 1.2). |
+| `alarms.parquet` | unchanged | Source frame for Tasks 1.2, 1.3, 1.4. |
+| `site_issues.parquet` | **new** | Suspected site-failure episodes (Task 1.3). |
+| `cgm_gaps.parquet` | **new** | Sensor-blind windows (Task 1.4). Resolves DATA_ISSUES #6. |
+
+## New Config Block
+
+`config/user_config.yaml` gained a `site_change_detection` block with four keys:
+
+```yaml
+site_change_detection:
+  forced_window_minutes: 120            # DATA_NOTES §2 — minutes after BatteryShutdownAlarm
+  cartridge_real_fill_threshold: 220    # DATA_NOTES §2 — units; placeholder pending more data
+  occlusion_cluster_window_minutes: 180 # DATA_NOTES §1 — max gap between occlusions in a cluster
+  min_occlusions_for_cluster: 2         # DATA_NOTES §1 — minimum cluster size to emit
+```
+
+All enrichment code reads these through `enrich_all(frames, config)`; no thresholds are hardcoded. Task 2.1 will replace the raw-dict load with a typed `AppConfig` — `load_config` in `ingestion/enrich.py` is intentionally thin because of that.
+
+## Test Status
+
+```
+167 passed, 1 skipped, 1 warning in 0.89s
+```
+
+Up from 108 at the end of Session 4. The skip is the API integration test gated behind `@pytest.mark.integration`.
+
+## Gotchas Discovered During Implementation
+
+1. **`cartridge_real_fill_threshold: 220` is a placeholder.** DATA_NOTES §2 observed only three cartridge fills (180 = forced, 240 = real). 220 is the midpoint. Revisit once more cartridge fills accumulate. All three observed samples classify correctly with this value, but the decision boundary is not well-calibrated.
+2. **Forced-site-change heuristic is timestamp-first, volume-second.** `enrich_events_df` first checks the `[shutdown_ts, shutdown_ts + forced_window_minutes]` window; only inside that window does the cartridge volume override kick in. Outside the window every site_change is `forced_by_alarm = False` regardless of volume. `tubing` and `cannula` subtypes carry no volume signal, so inside the window they are always forced — this is fine because a real site rotation always includes a cartridge fill that will dominate the decision.
+3. **`build_site_issues_df` has a fallback when `forced_by_alarm` is missing.** If called on a raw (un-enriched) `events_df`, every `site_change` is treated as a valid resolver. This is intentional — the alternative is silently dropping clusters. `enrich_all` runs the steps in the right order so the fallback only fires for ad-hoc callers and older tests.
+4. **`cgm_gaps` pairing mirrors `build_suspension_df`.** Double-activated and unpaired-cleared cases both log warnings rather than raising, matching how suspensions handle pairing anomalies. A trailing unpaired activation emits a row with `ongoing=True` and `duration_minutes=NaN`.
+5. **Override category edge case.** When `bolus_source == "override"` but `override_delta` net-zeros (within `_OVERRIDE_EPSILON = 0.01`), `enrich_requests_df` falls back to the standard user-branch categorization rather than emitting a spurious `override_up`/`override_down`. No such case observed in the real data, but it's covered in `test_enrich.py`.
+6. **Events dict order is preserved into enrichment.** `build_all` constructs `result` with a fixed key order (`cgm`, `bolus`, `requests`, `basal`, `suspension`, `events`, `alarms`) and `enrich_all` only adds (`site_issues`, `cgm_gaps`) — never renames or reorders existing keys. Callers that iterate `dfs.items()` (e.g. `fetch.save_df` loop) continue to work unchanged.
+
+## What's Next
+
+**Phase 2 — Detection Engine v1**, starting with **Task 2.1 — Config loader (`detection/config.py`)**. The plan (`docs/plans/2026-04-20-enrichment-and-detection-v1.md` ~line 787) specifies a typed, validated, `lru_cache`-backed `AppConfig` that supersedes the thin `load_config` in `ingestion/enrich.py`. Everything downstream of Task 2.1 (meal detection, anomaly detection, suspension analysis) reads config through that single typed entry point.
+
+After 2.1, Tasks 2.2+ build the detection primitives on top of the enriched frames this session produced: `site_issues.parquet` and `cgm_gaps.parquet` become first-class inputs that gate / enrich BG excursion analysis.
