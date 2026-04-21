@@ -581,8 +581,16 @@ def build_alarm_df(events: list, pump_serial: str) -> pd.DataFrame:
 # 8. Top-level routing
 # ---------------------------------------------------------------------------
 
-def build_all(events: list, pump_serial: str) -> dict[str, pd.DataFrame]:
+def build_all(
+    events: list,
+    pump_serial: str,
+    config: dict | None = None,
+) -> dict[str, pd.DataFrame]:
     """Run all builders and return a dict of named DataFrames.
+
+    If *config* is provided, runs `enrich_all` on the result before returning
+    so downstream consumers always see enriched frames. Passing ``None`` skips
+    enrichment (back-compat for tests and code paths that build raw frames).
 
     Logs a warning for any event types not consumed by any builder.
     """
@@ -604,5 +612,10 @@ def build_all(events: list, pump_serial: str) -> dict[str, pd.DataFrame]:
 
     for cls_name, count in sorted(unknown_counts.items()):
         logger.warning("Unhandled event type %s: %d occurrences", cls_name, count)
+
+    if config is not None:
+        # Imported here to avoid a circular import at module load time.
+        from .enrich import enrich_all
+        result = enrich_all(result, config)
 
     return result

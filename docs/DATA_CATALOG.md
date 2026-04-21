@@ -186,6 +186,8 @@ Stats (22-day sample, n=6,348): mean=158.4, std=65.5, min=33, Q1=110, median=144
 | food_insulin | float | Msg3 `foodbolussize` | Insulin calculated for carbs (units) |
 | correction_insulin | float | Msg3 `correctionbolussize` | Insulin calculated for BG correction (units) |
 | total_requested | float | Msg3 `totalbolussize` | Total recommended (may differ from delivered if override) |
+| bolus_category | str | derived (enrichment) | See DATA_NOTES §3. One of: `auto_correction` / `user_meal` / `user_meal_and_correction` / `user_correction_only` / `override_up` / `override_down` / `unknown` |
+| override_delta | float | derived (enrichment) | `total_requested − (food_insulin + correction_insulin)` when `bolus_source == "override"`, else NaN. Positive = override increased dose. |
 
 **`bolus_source` derivation** (from Msg2 fields, verified against CSV `BolusType`):
 
