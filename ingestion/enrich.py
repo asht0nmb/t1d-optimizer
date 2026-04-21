@@ -10,6 +10,7 @@ See `docs/operating_docs/DATA_NOTES.md` and
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -113,6 +114,101 @@ def _user_branch(carbs: float, food: float, correction: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Forced-site-change tagging (DATA_NOTES §2)
+# ---------------------------------------------------------------------------
+
+def enrich_events_df(
+    events_df: pd.DataFrame,
+    alarms_df: pd.DataFrame | None,
+    config: dict,
+) -> pd.DataFrame:
+    """Tag firmware-forced site changes after a `BatteryShutdownAlarm`.
+
+    Adds a `forced_by_alarm` column to `events_df`:
+      - `True` if `event_type == "site_change"` falls inside
+        `[shutdown_ts, shutdown_ts + forced_window_minutes]` of any activated
+        `BatteryShutdownAlarm`, subject to the cartridge volume override below.
+      - `False` for site_change rows outside that window (or when no such
+        alarm exists).
+      - `pd.NA` for non-site_change rows.
+
+    Cartridge volume override (DATA_NOTES §2): a `cartridge` subtype inside
+    the window whose `details.insulin_volume` is `>= cartridge_real_fill_threshold`
+    is treated as a real site change (`forced_by_alarm = False`). Missing /
+    malformed volumes default to forced. `tubing` and `cannula` subtypes carry
+    no volume signal and are always forced when inside the window.
+    """
+    out = events_df.copy()
+    out["forced_by_alarm"] = pd.Series(pd.NA, index=out.index, dtype="object")
+
+    if out.empty:
+        return out
+
+    site_mask = out["event_type"] == "site_change"
+    if not site_mask.any():
+        return out
+
+    out.loc[site_mask, "forced_by_alarm"] = False
+
+    if alarms_df is None or alarms_df.empty:
+        return out
+
+    shutdowns = alarms_df.loc[
+        (alarms_df["alarm_name"] == "BatteryShutdownAlarm")
+        & (alarms_df["action"] == "activated"),
+        "timestamp",
+    ].tolist()
+    if not shutdowns:
+        return out
+
+    window = pd.Timedelta(minutes=config["forced_window_minutes"])
+    threshold = config.get("cartridge_real_fill_threshold")
+
+    def _in_forced_window(event_ts) -> bool:
+        return any(s <= event_ts <= s + window for s in shutdowns)
+
+    for idx in out.index[site_mask]:
+        event_ts = out.at[idx, "timestamp"]
+        if not _in_forced_window(event_ts):
+            continue
+
+        subtype = out.at[idx, "event_subtype"]
+        if subtype == "cartridge" and threshold is not None:
+            volume = _parse_insulin_volume(out.at[idx, "details"])
+            if volume is not None and volume >= threshold:
+                # Large fill after pump-death → genuine site change.
+                continue
+
+        out.at[idx, "forced_by_alarm"] = True
+
+    return out
+
+
+def _parse_insulin_volume(details) -> float | None:
+    """Extract `insulin_volume` from a site_change details JSON string.
+
+    Returns None for missing keys, non-string inputs, malformed JSON, or
+    values that can't be coerced to float. Callers treat None as "no signal"
+    and fall back to the timestamp-only heuristic (i.e., forced).
+    """
+    if not isinstance(details, str):
+        return None
+    try:
+        payload = json.loads(details)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("insulin_volume")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
 
@@ -126,5 +222,12 @@ def enrich_all(frames: dict[str, pd.DataFrame], config: dict) -> dict[str, pd.Da
 
     if "requests" in out:
         out["requests"] = enrich_requests_df(out["requests"])
+
+    if "events" in out:
+        out["events"] = enrich_events_df(
+            out["events"],
+            out.get("alarms"),
+            config.get("site_change_detection", {}),
+        )
 
     return out
