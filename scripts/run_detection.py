@@ -24,6 +24,12 @@ from detection.clustering import cluster_days
 from detection.config import AppConfig, get_config
 from detection.features import daily_features
 from detection.meal import detect_meals
+from ingestion.enrich import (
+    build_cgm_gaps_df,
+    build_site_issues_df,
+    enrich_events_df,
+    enrich_requests_df,
+)
 from ingestion.storage import PROCESSED_DIR, load_df
 
 __all__ = ["run_anomalies", "run_meals", "run_clustering"]
@@ -79,6 +85,52 @@ def _require_parquet(name: str) -> pd.DataFrame:
     return df
 
 
+def _ensure_enriched(
+    frames: dict[str, pd.DataFrame],
+    config: AppConfig,
+) -> dict[str, pd.DataFrame]:
+    """Backfill enriched columns/frames when loading pre-enrichment parquets.
+
+    Parquets written before the enrichment pipeline landed (pre-commit 861379d)
+    lack bolus_category / override_delta / forced_by_alarm and are missing the
+    site_issues and cgm_gaps frames entirely. Detection functions require those,
+    so apply the same enrichment in-memory if columns are missing. The on-disk
+    parquets are untouched — the next fetch will persist enriched frames.
+    """
+    out = dict(frames)
+    site_cfg = config.raw.get("site_change_detection", {})
+
+    requests = out.get("requests")
+    if (
+        requests is not None
+        and not requests.empty
+        and "bolus_category" not in requests.columns
+    ):
+        out["requests"] = enrich_requests_df(requests)
+
+    events = out.get("events")
+    alarms = out.get("alarms")
+    if (
+        events is not None
+        and not events.empty
+        and "forced_by_alarm" not in events.columns
+    ):
+        out["events"] = enrich_events_df(events, alarms, site_cfg)
+
+    if "site_issues" not in out or out["site_issues"] is None:
+        if alarms is not None and not alarms.empty:
+            out["site_issues"] = build_site_issues_df(
+                alarms, out.get("events"), site_cfg
+            )
+        else:
+            out["site_issues"] = pd.DataFrame()
+
+    if "cgm_gaps" not in out or out["cgm_gaps"] is None:
+        out["cgm_gaps"] = build_cgm_gaps_df(alarms)
+
+    return out
+
+
 def run_anomalies(date_str: str) -> None:
     """Load enriched CGM, slice to ``date_str``, run anomaly detection, print."""
     get_config.cache_clear()
@@ -108,6 +160,9 @@ def run_meals(date_str: str) -> None:
 
     cgm = _require_parquet("cgm")
     requests = _require_parquet("requests")
+
+    enriched = _ensure_enriched({"requests": requests}, config)
+    requests = enriched["requests"]
 
     cgm_day = _slice_to_day(cgm, target, config)
     requests_day = _slice_to_day(requests, target, config)
@@ -166,6 +221,11 @@ def run_clustering(
             continue
         df = load_df(name)
         frames[name] = df if df is not None else pd.DataFrame()
+
+    events = load_df("events")
+    frames["events"] = events if events is not None else pd.DataFrame()
+
+    frames = _ensure_enriched(frames, config)
 
     if cgm.empty:
         print("No CGM data available; nothing to cluster.")
