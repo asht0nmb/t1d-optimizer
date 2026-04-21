@@ -20,6 +20,7 @@ build/
 # Data files
 test_data/
 data/
+data/models/
 *.csv
 *.parquet
 *.h5
