@@ -55,3 +55,69 @@ class TestMainRegistersSubcommands:
         assert "--retrain" in help_text
         assert "--start" in help_text
         assert "--end" in help_text
+
+
+class TestEnsureEnriched:
+    """Backfill enrichment on pre-enrichment parquets so CLI stays usable."""
+
+    def test_enriches_requests_when_bolus_category_missing(self):
+        import pandas as pd
+
+        from detection.config import load_config
+        from scripts.run_detection import _ensure_enriched
+
+        config = load_config()
+        raw_requests = pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2026-03-19 12:00", tz="UTC")],
+                "bolus_id": [1],
+                "carbs_g": [30.0],
+                "bg_mgdl": [120],
+                "iob": [0.0],
+                "bolus_source": ["user"],
+                "food_insulin": [2.0],
+                "correction_insulin": [0.0],
+                "total_requested": [2.0],
+                "pump_serial": ["TEST"],
+            }
+        )
+        out = _ensure_enriched({"requests": raw_requests}, config)
+        assert "bolus_category" in out["requests"].columns
+        assert "override_delta" in out["requests"].columns
+
+    def test_skips_enrichment_when_column_already_present(self):
+        import pandas as pd
+
+        from detection.config import load_config
+        from scripts.run_detection import _ensure_enriched
+
+        config = load_config()
+        already_enriched = pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2026-03-19 12:00", tz="UTC")],
+                "bolus_id": [1],
+                "carbs_g": [30.0],
+                "bg_mgdl": [120],
+                "iob": [0.0],
+                "bolus_source": ["user"],
+                "food_insulin": [2.0],
+                "correction_insulin": [0.0],
+                "total_requested": [2.0],
+                "pump_serial": ["TEST"],
+                "bolus_category": ["user_meal"],
+                "override_delta": [0.0],
+            }
+        )
+        out = _ensure_enriched({"requests": already_enriched}, config)
+        assert out["requests"] is already_enriched
+
+    def test_backfills_missing_site_issues_and_cgm_gaps(self):
+        import pandas as pd
+
+        from detection.config import load_config
+        from scripts.run_detection import _ensure_enriched
+
+        config = load_config()
+        out = _ensure_enriched({"alarms": pd.DataFrame()}, config)
+        assert "site_issues" in out
+        assert "cgm_gaps" in out
