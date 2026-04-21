@@ -218,6 +218,19 @@ Additional Msg2 fields: `declinedcorrectionRaw` (0=no, 1=user declined correctio
 | timestamp | datetime64[tz] | `eventTimestamp.datetime` | |
 | commanded_rate | float | `commandedRate / 1000` | **Must divide by 1000 — see §5 Bug 2** |
 
+**`events_df`** — Non-bolus pump events (site changes, mode changes, CGM sessions, etc.)
+
+| Column | Type | Source Field | Notes |
+|---|---|---|---|
+| timestamp | datetime64[tz] | `eventTimestamp.datetime` | |
+| event_type | str | derived | e.g. `site_change`, `mode_change`, `cgm_session` |
+| event_subtype | str | derived | e.g. `cartridge`, `tubing`, `cannula`, `exercising` |
+| previous_mode | str / None | derived (mode_change only) | |
+| details | str (JSON) | per-event | JSON payload (e.g. `{"insulin_volume": 240}` for cartridge fills) |
+| seqnum | int | `seqNum` | Monotonic pump sequence number |
+| pump_serial | str | | |
+| forced_by_alarm | bool / NA | derived (enrichment) | Only populated for `event_type == "site_change"` (NaN / None otherwise). `True` when a site_change falls within `site_change_detection.forced_window_minutes` of an activated `BatteryShutdownAlarm` — i.e. the fill is firmware-forced, not a real site rotation. Override: a `cartridge` subtype whose `details.insulin_volume >= site_change_detection.cartridge_real_fill_threshold` is treated as a genuine site change (`False`) even inside the window. See DATA_NOTES §2. |
+
 ---
 
 ## 4. Source 3: pydexcom (Planned)

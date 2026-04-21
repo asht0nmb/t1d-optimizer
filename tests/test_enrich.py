@@ -1,5 +1,6 @@
 """Tests for ingestion/enrich.py."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -7,6 +8,12 @@ import pytest
 
 PST = timezone(timedelta(hours=-8))
 SERIAL = "TEST123"
+
+
+def ts(hhmm: str) -> datetime:
+    """Build a PST datetime for a given HH:MM on the shared test date."""
+    hour, minute = (int(p) for p in hhmm.split(":"))
+    return datetime(2026, 3, 19, hour, minute, tzinfo=PST)
 
 
 # ---------------------------------------------------------------------------
@@ -212,3 +219,373 @@ class TestEnrichAll:
 
         out = enrich_all({}, config={})
         assert out == {}
+
+
+# ---------------------------------------------------------------------------
+# Task 1.2 — enrich_events_df
+# ---------------------------------------------------------------------------
+
+_EVENT_COLUMNS = [
+    "timestamp", "event_type", "event_subtype", "previous_mode",
+    "details", "seqnum", "pump_serial",
+]
+
+_ALARM_COLUMNS = [
+    "timestamp", "category", "action", "alarm_id", "alarm_name",
+    "param1", "param2", "seqnum", "pump_serial",
+]
+
+
+def _events_frame(rows: list[dict]) -> pd.DataFrame:
+    """Build an events_df with sensible defaults for missing columns."""
+    if not rows:
+        return pd.DataFrame(columns=_EVENT_COLUMNS)
+    filled = []
+    for i, r in enumerate(rows):
+        filled.append({
+            "timestamp": r.get("timestamp"),
+            "event_type": r.get("event_type"),
+            "event_subtype": r.get("event_subtype"),
+            "previous_mode": r.get("previous_mode"),
+            "details": r.get("details", json.dumps({})),
+            "seqnum": r.get("seqnum", i + 1),
+            "pump_serial": r.get("pump_serial", SERIAL),
+        })
+    return pd.DataFrame(filled, columns=_EVENT_COLUMNS)
+
+
+def _alarms_frame(rows: list[dict]) -> pd.DataFrame:
+    """Build an alarms_df with sensible defaults for missing columns."""
+    if not rows:
+        return pd.DataFrame(columns=_ALARM_COLUMNS)
+    filled = []
+    for i, r in enumerate(rows):
+        filled.append({
+            "timestamp": r.get("timestamp"),
+            "category": r.get("category", "alarm"),
+            "action": r.get("action", "activated"),
+            "alarm_id": r.get("alarm_id", 0),
+            "alarm_name": r.get("alarm_name"),
+            "param1": r.get("param1", float("nan")),
+            "param2": r.get("param2", float("nan")),
+            "seqnum": r.get("seqnum", i + 1),
+            "pump_serial": r.get("pump_serial", SERIAL),
+        })
+    return pd.DataFrame(filled, columns=_ALARM_COLUMNS)
+
+
+class TestEnrichEventsDf:
+    def test_site_change_within_window_tagged_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("09:15"), "event_type": "site_change", "event_subtype": "tubing"},
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == True  # noqa: E712
+
+    def test_site_change_outside_window_not_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("11:30"), "event_type": "site_change", "event_subtype": "tubing"},
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_site_change_before_alarm_not_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("07:00"), "event_type": "site_change", "event_subtype": "tubing"},
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_non_site_change_has_nan_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        events = _events_frame([
+            {"timestamp": ts("10:00"), "event_type": "mode_change", "event_subtype": "exercising"},
+        ])
+        out = enrich_events_df(
+            events, _alarms_frame([]),
+            {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220},
+        )
+        val = out.iloc[0]["forced_by_alarm"]
+        assert pd.isna(val) or val is None
+
+    def test_no_battery_shutdown_alarm_all_false(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("09:00"), "event_type": "site_change", "event_subtype": "tubing"},
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_no_alarms_frame_at_all(self):
+        from ingestion.enrich import enrich_events_df
+
+        events = _events_frame([
+            {"timestamp": ts("09:00"), "event_type": "site_change", "event_subtype": "tubing"},
+        ])
+        out = enrich_events_df(
+            events, None,
+            {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220},
+        )
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_multiple_site_changes_some_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("09:00"), "event_type": "site_change", "event_subtype": "tubing"},
+            {"timestamp": ts("09:05"), "event_type": "site_change", "event_subtype": "cannula"},
+            {"timestamp": ts("15:00"), "event_type": "site_change", "event_subtype": "cannula"},
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert list(out["forced_by_alarm"]) == [True, True, False]
+
+    # --- cartridge volume override (Step 3b refinement) ---
+
+    def test_cartridge_large_fill_in_window_is_real(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {
+                "timestamp": ts("09:30"),
+                "event_type": "site_change",
+                "event_subtype": "cartridge",
+                "details": json.dumps({"insulin_volume": 240}),
+            },
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_cartridge_small_fill_in_window_is_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {
+                "timestamp": ts("09:30"),
+                "event_type": "site_change",
+                "event_subtype": "cartridge",
+                "details": json.dumps({"insulin_volume": 180}),
+            },
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == True  # noqa: E712
+
+    def test_cartridge_at_exact_threshold_in_window_is_real(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {
+                "timestamp": ts("09:30"),
+                "event_type": "site_change",
+                "event_subtype": "cartridge",
+                "details": json.dumps({"insulin_volume": 220}),
+            },
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        # >= threshold counts as real
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_cartridge_malformed_details_in_window_is_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {
+                "timestamp": ts("09:30"),
+                "event_type": "site_change",
+                "event_subtype": "cartridge",
+                "details": "{not valid json",
+            },
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == True  # noqa: E712
+
+    def test_cartridge_missing_insulin_volume_in_window_is_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {
+                "timestamp": ts("09:30"),
+                "event_type": "site_change",
+                "event_subtype": "cartridge",
+                "details": json.dumps({}),
+            },
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == True  # noqa: E712
+
+    def test_cartridge_large_fill_outside_window_still_not_forced(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {
+                "timestamp": ts("20:00"),
+                "event_type": "site_change",
+                "event_subtype": "cartridge",
+                "details": json.dumps({"insulin_volume": 240}),
+            },
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_tubing_in_window_forced_regardless_of_details(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {
+                "timestamp": ts("09:00"),
+                "event_type": "site_change",
+                "event_subtype": "tubing",
+                "details": json.dumps({"prime_size": 500}),
+            },
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == True  # noqa: E712
+
+    def test_cannula_in_window_forced_regardless_of_details(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {
+                "timestamp": ts("09:00"),
+                "event_type": "site_change",
+                "event_subtype": "cannula",
+                "details": json.dumps({"prime_size": 300}),
+            },
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == True  # noqa: E712
+
+    def test_empty_events(self):
+        from ingestion.enrich import enrich_events_df
+
+        events = _events_frame([])
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.empty
+        assert "forced_by_alarm" in out.columns
+
+    def test_empty_alarms(self):
+        from ingestion.enrich import enrich_events_df
+
+        events = _events_frame([
+            {"timestamp": ts("09:00"), "event_type": "site_change", "event_subtype": "cartridge",
+             "details": json.dumps({"insulin_volume": 180})},
+        ])
+        out = enrich_events_df(
+            events, _alarms_frame([]),
+            {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220},
+        )
+        # No alarms → nothing can be forced, even a small cartridge fill
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_only_cleared_battery_alarm_does_not_force(self):
+        from ingestion.enrich import enrich_events_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "cleared"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("09:00"), "event_type": "site_change", "event_subtype": "tubing"},
+        ])
+        out = enrich_events_df(
+            events, alarms, {"forced_window_minutes": 120, "cartridge_real_fill_threshold": 220}
+        )
+        assert out.iloc[0]["forced_by_alarm"] == False  # noqa: E712
+
+    def test_enrich_all_wires_events_enrichment(self):
+        from ingestion.enrich import enrich_all
+
+        frames = {
+            "requests": _requests_row(source="user", carbs=30, food=7.0, total=7.0),
+            "events": _events_frame([
+                {"timestamp": ts("09:00"), "event_type": "site_change", "event_subtype": "tubing"},
+            ]),
+            "alarms": _alarms_frame([
+                {"timestamp": ts("08:06"), "alarm_name": "BatteryShutdownAlarm", "action": "activated"},
+            ]),
+        }
+        config = {
+            "site_change_detection": {
+                "forced_window_minutes": 120,
+                "cartridge_real_fill_threshold": 220,
+            }
+        }
+        out = enrich_all(frames, config=config)
+        assert "forced_by_alarm" in out["events"].columns
+        assert out["events"].iloc[0]["forced_by_alarm"] == True  # noqa: E712
