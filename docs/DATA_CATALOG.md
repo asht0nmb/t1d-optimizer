@@ -246,6 +246,22 @@ Clustering rule: activated occlusions are grouped while the gap to the previous 
 
 Dedup key: `["first_occlusion_ts", "pump_serial"]`. Persisted to `data/processed/site_issues.parquet`.
 
+**`cgm_gaps_df`** — CGM out-of-range episodes derived from `alarms_df` (enrichment helper; see DATA_ISSUES #6)
+
+| Column | Type | Source | Notes |
+|---|---|---|---|
+| start_ts | datetime64[tz] | `alarms_df` | Timestamp of the `cgm_out_of_range` activated row |
+| end_ts | datetime64[tz] / NaT | `alarms_df` | Timestamp of the matching `cleared` row; `NaT` if the gap is still open at the time the frame is built |
+| duration_minutes | float | derived | `(end_ts − start_ts)` in minutes; `NaN` when `ongoing` |
+| pump_serial | str | | |
+| ongoing | bool | derived | `True` when `end_ts` is `NaT` (unpaired activation at end of data) |
+
+Pairing rule: iterate `alarm_name == "cgm_out_of_range"` rows sorted by timestamp, maintaining one open activated event. A second `activated` without an intervening `cleared` force-closes the prior episode at the new activation timestamp and logs a warning (analogous to double-suspend handling); an unpaired `cleared` is logged and skipped.
+
+Detection code uses these windows to exclude periods where Control-IQ had no CGM signal (and therefore couldn't adjust basal / deliver auto-corrections) from trend and anomaly analysis.
+
+Dedup key: `["start_ts", "pump_serial"]`. Persisted to `data/processed/cgm_gaps.parquet`.
+
 ---
 
 ## 4. Source 3: pydexcom (Planned)

@@ -336,6 +336,107 @@ def _empty_site_issues() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# CGM out-of-range episodes → cgm_gaps (DATA_ISSUES #6)
+# ---------------------------------------------------------------------------
+
+_CGM_GAPS_COLUMNS = [
+    "start_ts",
+    "end_ts",
+    "duration_minutes",
+    "pump_serial",
+    "ongoing",
+]
+
+
+def build_cgm_gaps_df(alarms_df: pd.DataFrame | None) -> pd.DataFrame:
+    """Pair `cgm_out_of_range` activated/cleared rows into sensor-blind episodes.
+
+    Detection code uses these windows to exclude periods where Control-IQ had
+    no CGM signal (and therefore couldn't dose / adjust). The pairing mirrors
+    `build_suspension_df`: maintain one open `activated` event; when a
+    `cleared` arrives, pair them. A second `activated` without an intervening
+    `cleared` force-closes the prior episode at the new activation timestamp
+    and logs a warning. A trailing unpaired `activated` is emitted with
+    `end_ts = NaT`, `duration_minutes = NaN`, `ongoing = True`.
+    """
+    empty = _empty_cgm_gaps()
+    if alarms_df is None or alarms_df.empty:
+        return empty
+
+    gap_alarms = alarms_df[alarms_df["alarm_name"] == "cgm_out_of_range"]
+    if gap_alarms.empty:
+        return empty
+
+    gap_alarms = gap_alarms.sort_values("timestamp")
+
+    episodes: list[dict] = []
+    current: pd.Series | None = None
+
+    for _, row in gap_alarms.iterrows():
+        action = row["action"]
+        ts_ = row["timestamp"]
+        if action == "activated":
+            if current is not None:
+                logger.warning(
+                    "Double-activated cgm_out_of_range at %s; closing prior "
+                    "unpaired episode started at %s",
+                    ts_,
+                    current["timestamp"],
+                )
+                episodes.append(_closed_gap(current, ts_))
+            current = row
+        elif action == "cleared":
+            if current is None:
+                logger.warning(
+                    "Unpaired cgm_out_of_range cleared at %s; skipping", ts_
+                )
+                continue
+            episodes.append(_closed_gap(current, ts_))
+            current = None
+        # Any other action (e.g. "ack") is ignored — sensor-blind state is
+        # defined by activated/cleared transitions only.
+
+    if current is not None:
+        episodes.append({
+            "start_ts": current["timestamp"],
+            "end_ts": pd.NaT,
+            "duration_minutes": float("nan"),
+            "pump_serial": current["pump_serial"],
+            "ongoing": True,
+        })
+
+    if not episodes:
+        return empty
+
+    return pd.DataFrame(episodes, columns=_CGM_GAPS_COLUMNS)
+
+
+def _closed_gap(activated_row: pd.Series, end_ts: pd.Timestamp) -> dict:
+    start_ts = activated_row["timestamp"]
+    dur = (end_ts - start_ts).total_seconds() / 60.0
+    return {
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "duration_minutes": dur,
+        "pump_serial": activated_row["pump_serial"],
+        "ongoing": False,
+    }
+
+
+def _empty_cgm_gaps() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "start_ts": pd.Series(dtype="datetime64[ns, UTC]"),
+            "end_ts": pd.Series(dtype="datetime64[ns, UTC]"),
+            "duration_minutes": pd.Series(dtype="float64"),
+            "pump_serial": pd.Series(dtype="object"),
+            "ongoing": pd.Series(dtype="bool"),
+        },
+        columns=_CGM_GAPS_COLUMNS,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
 
@@ -366,5 +467,6 @@ def enrich_all(frames: dict[str, pd.DataFrame], config: dict) -> dict[str, pd.Da
             out.get("events", pd.DataFrame()),
             site_cfg,
         )
+        out["cgm_gaps"] = build_cgm_gaps_df(out.get("alarms"))
 
     return out
