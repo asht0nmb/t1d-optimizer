@@ -589,3 +589,196 @@ class TestEnrichEventsDf:
         out = enrich_all(frames, config=config)
         assert "forced_by_alarm" in out["events"].columns
         assert out["events"].iloc[0]["forced_by_alarm"] == True  # noqa: E712
+
+
+# ---------------------------------------------------------------------------
+# Task 1.3 — build_site_issues_df
+# ---------------------------------------------------------------------------
+
+def _empty_events() -> pd.DataFrame:
+    return _events_frame([])
+
+
+def _cfg() -> dict:
+    return {
+        "occlusion_cluster_window_minutes": 180,
+        "min_occlusions_for_cluster": 2,
+    }
+
+
+class TestBuildSiteIssuesDf:
+    def test_single_occlusion_not_a_cluster(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        out = build_site_issues_df(alarms, _empty_events(), _cfg())
+        assert out.empty
+
+    def test_two_occlusions_within_window_cluster(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("10:45"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        out = build_site_issues_df(alarms, _empty_events(), _cfg())
+        assert len(out) == 1
+        row = out.iloc[0]
+        assert row["occlusion_count"] == 2
+        assert row["first_occlusion_ts"] == ts("10:00")
+        assert row["last_occlusion_ts"] == ts("10:45")
+        assert row["pump_serial"] == SERIAL
+
+    def test_three_occlusions_all_one_cluster(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("11:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("12:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        out = build_site_issues_df(alarms, _empty_events(), _cfg())
+        assert len(out) == 1
+        assert out.iloc[0]["occlusion_count"] == 3
+
+    def test_occlusions_split_into_two_clusters_when_gap_exceeds_window(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("10:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("16:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("16:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        out = build_site_issues_df(alarms, _empty_events(), _cfg())
+        assert len(out) == 2
+        assert list(out["occlusion_count"]) == [2, 2]
+        assert list(out["first_occlusion_ts"]) == [ts("10:00"), ts("16:00")]
+        assert list(out["last_occlusion_ts"]) == [ts("10:30"), ts("16:30")]
+
+    def test_resolution_linked_to_site_change(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("10:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("11:00"), "event_type": "site_change", "event_subtype": "cannula"},
+        ])
+        # Caller passes events_df that has already been through enrich_events_df,
+        # so forced_by_alarm is populated (False here: no BatteryShutdownAlarm).
+        events["forced_by_alarm"] = False
+        out = build_site_issues_df(alarms, events, _cfg())
+        assert out.iloc[0]["resolved_by_site_change_ts"] == ts("11:00")
+        assert out.iloc[0]["resolution_delay_minutes"] == pytest.approx(30.0)
+
+    def test_forced_site_change_does_not_resolve(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("10:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("11:00"), "event_type": "site_change", "event_subtype": "cartridge"},
+        ])
+        events["forced_by_alarm"] = True
+        out = build_site_issues_df(alarms, events, _cfg())
+        assert pd.isna(out.iloc[0]["resolved_by_site_change_ts"])
+        assert pd.isna(out.iloc[0]["resolution_delay_minutes"])
+
+    def test_forced_skipped_real_later_resolves(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("10:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("11:00"), "event_type": "site_change", "event_subtype": "cartridge"},
+            {"timestamp": ts("13:00"), "event_type": "site_change", "event_subtype": "cannula"},
+        ])
+        events["forced_by_alarm"] = [True, False]
+        out = build_site_issues_df(alarms, events, _cfg())
+        assert out.iloc[0]["resolved_by_site_change_ts"] == ts("13:00")
+        assert out.iloc[0]["resolution_delay_minutes"] == pytest.approx(150.0)
+
+    def test_unresolved_cluster_has_nat_resolution(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("10:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        out = build_site_issues_df(alarms, _empty_events(), _cfg())
+        assert pd.isna(out.iloc[0]["resolved_by_site_change_ts"])
+        assert pd.isna(out.iloc[0]["resolution_delay_minutes"])
+
+    def test_empty_alarms_returns_empty_with_schema(self):
+        from ingestion.enrich import build_site_issues_df
+
+        out = build_site_issues_df(_alarms_frame([]), _empty_events(), _cfg())
+        assert out.empty
+        for col in [
+            "first_occlusion_ts", "last_occlusion_ts", "occlusion_count",
+            "resolved_by_site_change_ts", "resolution_delay_minutes", "pump_serial",
+        ]:
+            assert col in out.columns
+
+    def test_cleared_occlusions_ignored(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("10:05"), "alarm_name": "OcclusionAlarm", "action": "cleared"},
+            {"timestamp": ts("10:30"), "alarm_name": "OcclusionAlarm", "action": "cleared"},
+        ])
+        out = build_site_issues_df(alarms, _empty_events(), _cfg())
+        # Only one activated occlusion → no cluster.
+        assert out.empty
+
+    def test_missing_forced_by_alarm_column_treats_all_as_non_forced(self):
+        from ingestion.enrich import build_site_issues_df
+
+        alarms = _alarms_frame([
+            {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            {"timestamp": ts("10:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+        ])
+        events = _events_frame([
+            {"timestamp": ts("11:00"), "event_type": "site_change", "event_subtype": "cannula"},
+        ])
+        # Deliberately no forced_by_alarm column — backward-compat path.
+        assert "forced_by_alarm" not in events.columns
+        out = build_site_issues_df(alarms, events, _cfg())
+        assert out.iloc[0]["resolved_by_site_change_ts"] == ts("11:00")
+
+    def test_enrich_all_attaches_site_issues_frame(self):
+        from ingestion.enrich import enrich_all
+
+        frames = {
+            "events": _events_frame([
+                {"timestamp": ts("11:00"), "event_type": "site_change", "event_subtype": "cannula"},
+            ]),
+            "alarms": _alarms_frame([
+                {"timestamp": ts("10:00"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+                {"timestamp": ts("10:30"), "alarm_name": "OcclusionAlarm", "action": "activated"},
+            ]),
+        }
+        config = {
+            "site_change_detection": {
+                "forced_window_minutes": 120,
+                "cartridge_real_fill_threshold": 220,
+                "occlusion_cluster_window_minutes": 180,
+                "min_occlusions_for_cluster": 2,
+            }
+        }
+        out = enrich_all(frames, config=config)
+        assert "site_issues" in out
+        site_issues = out["site_issues"]
+        assert len(site_issues) == 1
+        # Events enrichment ran first, so the non-BatteryShutdown site_change
+        # is marked forced_by_alarm=False and therefore resolves the cluster.
+        assert site_issues.iloc[0]["resolved_by_site_change_ts"] == ts("11:00")

@@ -32,6 +32,13 @@ site_change_detection:
   # is treated as a genuine site change even after a pump-death restart.
   # Placeholder; dial in as more cartridge fills are observed.
   cartridge_real_fill_threshold: 220
+  # Maximum gap between consecutive OcclusionAlarm activations that still
+  # belong to the same site-failure cluster. See docs/operating_docs/DATA_NOTES.md §1.
+  occlusion_cluster_window_minutes: 180
+  # Minimum number of activated occlusions required to emit a cluster into
+  # site_issues.parquet. A single isolated occlusion is not clinically
+  # significant; 2+ in a short window usually means a failing infusion set.
+  min_occlusions_for_cluster: 2
 
 clustering:
   method: kmeans

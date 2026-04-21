@@ -231,6 +231,21 @@ Additional Msg2 fields: `declinedcorrectionRaw` (0=no, 1=user declined correctio
 | pump_serial | str | | |
 | forced_by_alarm | bool / NA | derived (enrichment) | Only populated for `event_type == "site_change"` (NaN / None otherwise). `True` when a site_change falls within `site_change_detection.forced_window_minutes` of an activated `BatteryShutdownAlarm` — i.e. the fill is firmware-forced, not a real site rotation. Override: a `cartridge` subtype whose `details.insulin_volume >= site_change_detection.cartridge_real_fill_threshold` is treated as a genuine site change (`False`) even inside the window. See DATA_NOTES §2. |
 
+**`site_issues_df`** — Suspected site-failure episodes derived from `alarms_df` (enrichment helper; see DATA_NOTES §1)
+
+| Column | Type | Source | Notes |
+|---|---|---|---|
+| first_occlusion_ts | datetime64[tz] | `alarms_df` | Timestamp of the first `OcclusionAlarm` activation in the cluster |
+| last_occlusion_ts | datetime64[tz] | `alarms_df` | Timestamp of the last activation in the cluster |
+| occlusion_count | int | derived | Number of activated occlusions in the cluster (always `>= site_change_detection.min_occlusions_for_cluster`) |
+| resolved_by_site_change_ts | datetime64[tz] / NaT | `events_df` | Timestamp of the first `site_change` event strictly after `last_occlusion_ts` whose `forced_by_alarm != True`. NaT if no such site change exists yet. |
+| resolution_delay_minutes | float | derived | `(resolved_by_site_change_ts − last_occlusion_ts)` in minutes; NaN when unresolved |
+| pump_serial | str | | |
+
+Clustering rule: activated occlusions are grouped while the gap to the previous activation is `<= site_change_detection.occlusion_cluster_window_minutes`; a larger gap starts a new cluster. Only clusters meeting `min_occlusions_for_cluster` are emitted.
+
+Dedup key: `["first_occlusion_ts", "pump_serial"]`. Persisted to `data/processed/site_issues.parquet`.
+
 ---
 
 ## 4. Source 3: pydexcom (Planned)
