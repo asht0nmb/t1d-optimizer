@@ -21,6 +21,11 @@ anomaly_detection:
   spike_threshold: 180
   drop_threshold: 70
   flatline_tolerance: 2
+  # Number of consecutive 5-minute CGM readings whose rolling variance must
+  # fall below flatline_tolerance before a flatline is flagged. K=12 == 1 hour
+  # of flat signal; tuned for a low false-positive rate. Lower this to fire
+  # sooner, raise it to require longer sustained flatness.
+  flatline_consecutive_intervals: 12
 
 site_change_detection:
   # Minutes after a BatteryShutdownAlarm during which a logged site_change is
