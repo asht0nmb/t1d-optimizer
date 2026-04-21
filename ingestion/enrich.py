@@ -15,23 +15,25 @@ import logging
 from pathlib import Path
 
 import pandas as pd
-import yaml
+
+from detection.config import get_config as _get_app_config
+from detection.config import load_config as _load_app_config
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_PATH = Path("config/user_config.yaml")
-
 
 def load_config(path: Path | None = None) -> dict:
-    """Minimal YAML config loader.
+    """Return the raw config dict.
 
-    Task 2.1 introduces a typed, validated `AppConfig` in
-    `detection/config.py` that supersedes this helper. Callers that only
-    need the raw dict (fetch → enrich pipeline) can keep using it.
+    Thin back-compat shim over `detection.config.load_config`. The fetch
+    pipeline (`ingestion/fetch.py`) and the enrichment functions in this
+    module accept a raw dict (e.g. `config["site_change_detection"]`), so
+    we expose `AppConfig.raw` here. Detection code should import
+    `detection.config.get_config` directly for the typed `AppConfig`.
     """
-    p = path or _CONFIG_PATH
-    with open(p) as f:
-        return yaml.safe_load(f) or {}
+    if path is None:
+        return _get_app_config().raw
+    return _load_app_config(path).raw
 
 # Insulin-unit tolerance for override_delta sign classification.
 # Covers float noise from Msg3 fractional unit reporting.
