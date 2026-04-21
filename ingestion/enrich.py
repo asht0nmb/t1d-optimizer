@@ -209,6 +209,133 @@ def _parse_insulin_volume(details) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Occlusion clustering → site_issues (DATA_NOTES §1)
+# ---------------------------------------------------------------------------
+
+_SITE_ISSUES_COLUMNS = [
+    "first_occlusion_ts",
+    "last_occlusion_ts",
+    "occlusion_count",
+    "resolved_by_site_change_ts",
+    "resolution_delay_minutes",
+    "pump_serial",
+]
+
+
+def build_site_issues_df(
+    alarms_df: pd.DataFrame,
+    events_df: pd.DataFrame,
+    config: dict,
+) -> pd.DataFrame:
+    """Cluster `OcclusionAlarm` activations into suspected site-failure episodes.
+
+    A cluster is a run of activated `OcclusionAlarm` rows within
+    `occlusion_cluster_window_minutes` of the previous alarm. Only clusters
+    with `occlusion_count >= min_occlusions_for_cluster` are emitted
+    (per DATA_NOTES §1: a single isolated occlusion is not clinically
+    significant; 2+ together indicate a failing site).
+
+    Resolution is the first `site_change` event (any subtype) strictly after
+    `last_occlusion_ts` whose `forced_by_alarm != True` — firmware-forced
+    cartridge refills tagged by `enrich_events_df` do not count as real site
+    rotations. If `events_df` lacks a `forced_by_alarm` column (e.g.
+    enrichment hasn't run yet), all site_change rows are treated as
+    non-forced; unresolved clusters leave NaT / NaN.
+    """
+    window = pd.Timedelta(minutes=config.get("occlusion_cluster_window_minutes", 180))
+    min_count = config.get("min_occlusions_for_cluster", 2)
+
+    empty = _empty_site_issues()
+    if alarms_df is None or alarms_df.empty:
+        return empty
+
+    occl = alarms_df[
+        (alarms_df["alarm_name"] == "OcclusionAlarm")
+        & (alarms_df["action"] == "activated")
+    ].sort_values("timestamp")
+    if occl.empty:
+        return empty
+
+    real_site_changes = _real_site_changes(events_df).sort_values("timestamp")
+
+    clusters: list[dict] = []
+    current: list[pd.Series] | None = None
+    prev_ts: pd.Timestamp | None = None
+
+    for _, row in occl.iterrows():
+        ts = row["timestamp"]
+        if current is None or (ts - prev_ts) > window:
+            if current is not None:
+                clusters.append(_summarize_cluster(current, real_site_changes))
+            current = [row]
+        else:
+            current.append(row)
+        prev_ts = ts
+
+    if current is not None:
+        clusters.append(_summarize_cluster(current, real_site_changes))
+
+    filtered = [c for c in clusters if c["occlusion_count"] >= min_count]
+    if not filtered:
+        return empty
+
+    return pd.DataFrame(filtered, columns=_SITE_ISSUES_COLUMNS)
+
+
+def _real_site_changes(events_df: pd.DataFrame) -> pd.DataFrame:
+    """Return site_change rows eligible to resolve an occlusion cluster.
+
+    Firmware-forced fills (`forced_by_alarm == True`) are excluded. If the
+    column is absent, assume enrichment hasn't run and accept everything.
+    """
+    if events_df is None or events_df.empty:
+        return pd.DataFrame(columns=["timestamp"])
+    site = events_df[events_df["event_type"] == "site_change"]
+    if site.empty:
+        return site
+    if "forced_by_alarm" in site.columns:
+        site = site[site["forced_by_alarm"] != True]  # noqa: E712
+    return site
+
+
+def _summarize_cluster(rows: list[pd.Series], site_changes: pd.DataFrame) -> dict:
+    first_ts = rows[0]["timestamp"]
+    last_ts = rows[-1]["timestamp"]
+    pump_serial = rows[0]["pump_serial"]
+
+    resolver_ts = pd.NaT
+    delay = float("nan")
+    if not site_changes.empty:
+        after = site_changes[site_changes["timestamp"] > last_ts]
+        if not after.empty:
+            resolver_ts = after.iloc[0]["timestamp"]
+            delay = (resolver_ts - last_ts).total_seconds() / 60.0
+
+    return {
+        "first_occlusion_ts": first_ts,
+        "last_occlusion_ts": last_ts,
+        "occlusion_count": len(rows),
+        "resolved_by_site_change_ts": resolver_ts,
+        "resolution_delay_minutes": delay,
+        "pump_serial": pump_serial,
+    }
+
+
+def _empty_site_issues() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "first_occlusion_ts": pd.Series(dtype="datetime64[ns, UTC]"),
+            "last_occlusion_ts": pd.Series(dtype="datetime64[ns, UTC]"),
+            "occlusion_count": pd.Series(dtype="int64"),
+            "resolved_by_site_change_ts": pd.Series(dtype="datetime64[ns, UTC]"),
+            "resolution_delay_minutes": pd.Series(dtype="float64"),
+            "pump_serial": pd.Series(dtype="object"),
+        },
+        columns=_SITE_ISSUES_COLUMNS,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
 
@@ -219,6 +346,7 @@ def enrich_all(frames: dict[str, pd.DataFrame], config: dict) -> dict[str, pd.Da
     Missing frames are tolerated — callers may pass partial dicts for testing.
     """
     out = dict(frames)
+    site_cfg = config.get("site_change_detection", {})
 
     if "requests" in out:
         out["requests"] = enrich_requests_df(out["requests"])
@@ -227,7 +355,16 @@ def enrich_all(frames: dict[str, pd.DataFrame], config: dict) -> dict[str, pd.Da
         out["events"] = enrich_events_df(
             out["events"],
             out.get("alarms"),
-            config.get("site_change_detection", {}),
+            site_cfg,
+        )
+
+    # Site issues depend on events already carrying `forced_by_alarm`, so this
+    # must run after enrich_events_df.
+    if "alarms" in out:
+        out["site_issues"] = build_site_issues_df(
+            out["alarms"],
+            out.get("events", pd.DataFrame()),
+            site_cfg,
         )
 
     return out
