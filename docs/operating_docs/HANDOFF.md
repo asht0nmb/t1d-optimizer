@@ -223,3 +223,114 @@ Up from 108 at the end of Session 4. The skip is the API integration test gated 
 **Phase 2 — Detection Engine v1**, starting with **Task 2.1 — Config loader (`detection/config.py`)**. The plan (`docs/plans/2026-04-20-enrichment-and-detection-v1.md` ~line 787) specifies a typed, validated, `lru_cache`-backed `AppConfig` that supersedes the thin `load_config` in `ingestion/enrich.py`. Everything downstream of Task 2.1 (meal detection, anomaly detection, suspension analysis) reads config through that single typed entry point.
 
 After 2.1, Tasks 2.2+ build the detection primitives on top of the enriched frames this session produced: `site_issues.parquet` and `cgm_gaps.parquet` become first-class inputs that gate / enrich BG excursion analysis.
+
+---
+
+# Handoff: Session 6 — Detection Engine v1
+
+**Date:** 2026-04-21
+**Status:** Phase 2 complete. Detection Engine v1 (anomaly / missed-meal / daily clustering) shipped on `feat/enrichment-detection-v1`. All of Tasks 2.1–2.6 plus this documentation task (2.7) landed. Phase 3 (surfaces: Telegram, Streamlit, pydexcom live) is deferred.
+
+## What Shipped
+
+Six commits on `feat/enrichment-detection-v1` above the Session 5 tip, implementing Tasks 2.1–2.6 of `docs/plans/2026-04-20-enrichment-and-detection-v1.md`:
+
+| SHA | Task | Summary |
+|---|---|---|
+| `a4e2273` | 2.1 | `detection/config.py` — typed, validated, `lru_cache`-backed `AppConfig` |
+| `e932686` | 2.2 | `detection/anomaly.py` — spike / drop / flatline detection (K=12 default) |
+| `920f022` | 2.3 | `detection/meal.py` — sustained-rise + bolus-lookback missed-meal detection |
+| `b76218e` | 2.4 | `detection/features.py` — 14-feature per-day aggregation for clustering |
+| `3477e0d` | 2.5 | `detection/clustering.py` — KMeans over scaled daily features, persisted |
+| `8a417c2` | 2.6 | CLI subcommands: `analyze-anomalies`, `analyze-meals`, `cluster-days` |
+
+All detection code is source-agnostic — modules import only from `detection/` and never from `ingestion/` or tconnectsync. Everything reads config through `detection.config.get_config()` (the single typed entry point introduced in Task 2.1).
+
+## New Package Layout
+
+```
+detection/
+├── __init__.py
+├── config.py        # AppConfig + per-block dataclasses (Task 2.1)
+├── anomaly.py       # detect_anomalies         (Task 2.2)
+├── meal.py          # detect_meals             (Task 2.3)
+├── features.py      # daily_features           (Task 2.4)
+└── clustering.py    # cluster_days             (Task 2.5)
+```
+
+### Function contracts
+
+| Function | Signature | Inputs | Output |
+|---|---|---|---|
+| `detect_anomalies` | `(cgm_df, config) -> DataFrame` | `cgm_df` shaped like `build_cgm_df` (needs `timestamp`, `bg_mgdl`, `backfilled`); `AppConfig` | One row per event with `timestamp, anomaly_type ∈ {spike,drop,flatline}, bg_at_event, rate_mgdl_per_min, confidence, is_backfilled_context` |
+| `detect_meals` | `(cgm_df, requests_df, config) -> DataFrame` | CGM as above; enriched `requests_df` (needs `timestamp`, `bolus_category`); `AppConfig` | One row per detected missed meal: `timestamp, bg_start, bg_peak, rise_rate_per_5min, meal_window, confidence` |
+| `daily_features` | `(frames, date, config) -> dict` | `frames` dict (cgm/bolus/basal/requests/suspension/alarms/cgm_gaps); `datetime.date`; `AppConfig` | 16-key dict (`date` + 14 features — see DATA_CATALOG §4.3) |
+| `cluster_days` | `(features_df, config, retrain=False) -> DataFrame` | One-row-per-day features (must have `date`); `AppConfig`; optional retrain flag | `date, cluster_id, distance_to_centroid` |
+
+### CLI commands
+
+```bash
+uv run python main.py analyze-anomalies --date YYYY-MM-DD   # Runs detect_anomalies for one day
+uv run python main.py analyze-meals     --date YYYY-MM-DD   # Runs detect_meals for one day
+uv run python main.py cluster-days [--retrain] [--start ...] [--end ...]
+                                                            # Builds daily_features across the range and clusters
+```
+
+`cluster-days --retrain` refits the scaler + KMeans and overwrites the persisted pickles; without `--retrain`, it loads the saved model and predicts. Output is written to `data/processed/daily_clusters.parquet`.
+
+## Config Additions
+
+`config/user_config.yaml` gained one explicit key this session:
+
+```yaml
+anomaly_detection:
+  flatline_consecutive_intervals: 12   # K: 12 × 5-min = 1 hour of flat signal
+```
+
+Clustering defaults (`random_seed: 42`, `model_dir: "data/models"`) are supplied by `detection/config.py` when absent from the YAML — so a stock `clustering:` block continues to validate. Add them explicitly in the YAML to override.
+
+## Decisions That Diverged From the Plan
+
+All recorded in the respective module docstrings / PR notes:
+
+1. **Flatline K = 12, not 6.** The plan proposed `flatline_consecutive_intervals: 6` (30 min). During Task 2.2 we bumped to 12 (1 hour) to suppress false positives during normal stable periods; 6 fires on ordinary overnight plateaus. Config-controlled so it's easy to revisit.
+2. **`cartridge_real_fill_threshold: 220` is still a placeholder** (inherited from Session 5). Only three cartridge fills observed (180 = forced, 240 = real); 220 is the midpoint. Revisit once more fills accumulate.
+3. **Meal windows labeled `window_0` / `window_1` / `window_2`** (position-keyed), not `"breakfast"` / `"lunch"` / `"dinner"`. Keeps the code config-driven: users can reorder or rename YAML entries without touching detection code. Off-hours rises are labeled `"off_window"`.
+4. **Meal detection uses fixed-size runs of `sustained_intervals`**, not greedy extension. Each run is exactly `N` consecutive valid-cadence rising intervals; on a hit we advance past the run's final index. Keeps `rise_rate_per_5min` comparable across events.
+5. **`daily_features` empty-frame defaults.** Counts/sums (`total_daily_insulin`, `meal_count`, `total_carbs_g`, `alarm_count`, `suspension_minutes`, `out_of_range_minutes`) default to `0` when their source frame is missing. Ratios/means (`tir_*`, `time_*`, `mean_bg`, `std_bg`, `cv_bg`, `basal_bolus_ratio`, `overnight_dip`, `mean_postprandial_peak`) default to `NaN` — they're undefined, not zero. `std_bg` uses `ddof=0` so single-reading days don't produce NaN.
+6. **`cluster_days` fit-and-warn.** When `retrain=False` and no saved model exists on disk, we fit a fresh pipeline and emit a WARNING naming the model_dir, rather than raising. Rationale: first-run ergonomics — a brand-new checkout should work without requiring the user to type `--retrain`. The warning keeps the implicit training visible.
+7. **Third persisted artefact `features_v1.json`** alongside `kmeans_v1.pkl` and `scaler_v1.pkl`. Captures the training-time column ordering so `predict` can reorder a caller's feature matrix to match — callers can pass columns in any order as long as the set is a superset of training.
+
+## Test Status
+
+```
+251 passed, 1 skipped, 2 warnings
+```
+
+Up from 108 at the end of Session 4 and 167 at the end of Session 5. The skip is the same API integration test gated behind `@pytest.mark.integration`. New Phase 2 test modules: `test_detection_config.py`, `test_detection_anomaly.py`, `test_detection_meal.py`, `test_detection_features.py`, `test_detection_clustering.py`, `test_cli_detection.py`.
+
+## Known Limitations
+
+1. **Confidence heuristics are placeholder arithmetic.** `detect_anomalies` and `detect_meals` both emit a `confidence` column derived from simple ratios of magnitude-over-threshold. They're intended for ordering, not calibration. Need recalibration (or replacement with a classifier) before Phase 3 notifications go live — otherwise the Telegram cooldown will either spam or starve.
+2. **KMeans clustering is unsupervised.** There is no labeled ground truth for cluster validation; `n_clusters=5` is the plan's starting point. Cluster quality is judged by eyeball only until we collect labels.
+3. **No real-time variant yet.** `detect_anomalies_realtime`, `detect_meals_realtime`, etc. are deferred to Phase 3. v1 is batch-only over a normalized DataFrame — it's the right shape for wrapping in a streaming loop, but nothing enforces the trailing-window-only constraint yet.
+4. **Clustering model is undertrained.** The persisted `kmeans_v1.pkl` / `scaler_v1.pkl` were fit on ≤ 6 days of local data (everything currently in `data/processed/`). The first thing the user should do is run a full historical fetch and re-cluster — see **Next steps** below.
+5. **`cartridge_real_fill_threshold: 220` placeholder** (see Decision 2 above). Dial in once more cartridge fills accumulate.
+
+## Next Steps for the User
+
+In this order:
+
+1. **Full historical fetch.** Run `uv run python main.py fetch` to pull the full ~15 months of data across all six pumps (10–30 min).
+2. **Refit clustering.** Run `uv run python main.py cluster-days --retrain` to rebuild `kmeans_v1.pkl` / `scaler_v1.pkl` / `features_v1.json` on the full history. Expect ≥ ~30 days in the output with a sensible cluster-size distribution (no singleton clusters unless a day is genuinely pathological).
+3. **Eyeball detection on a known day.** The plan's validation target is 2026-03-19 (pump died 08:06, occlusion at 22:36, lots of high-BG excursions). Run:
+   ```bash
+   uv run python main.py analyze-anomalies --date 2026-03-19
+   uv run python main.py analyze-meals --date 2026-03-19
+   ```
+   Expected: multiple spikes including the post-shutdown rise, the 22:36 drop if present, and a flatline during the dead-pump window — **verify** `is_backfilled_context=True` on rows whose timestamps fall inside a `cgm_gaps` episode.
+4. **Tune `cartridge_real_fill_threshold`** once the full fetch surfaces more cartridge fills. The YAML comment spells out the signal (insulin_volume at fill time; ≥ threshold inside the forced-window overrides the forced flag).
+
+## What's Next
+
+Phase 3 — **Surfaces**. See the bottom of `docs/plans/2026-04-20-enrichment-and-detection-v1.md` (the OUT OF SCOPE block). Tentative filename: `docs/plans/YYYY-MM-DD-surfaces.md`. Covers pydexcom live feed, Telegram notifications (threshold + cooldown + message formatting), Streamlit dashboard, and real-time variants of the detection functions. The v1 detection API is intentionally pure DataFrame-in / DataFrame-out so the surface layer can wrap it without refactor.

@@ -105,10 +105,10 @@ From a 22-day sample (Mar 1–22, 2026): 16,441 total events.
 | Category | Event Type | Count | ~Per Day | Key Fields |
 |---|---|---|---|---|
 | **CGM** | `LidCgmDataG7` | 6,348 | 289 | `currentglucosedisplayvalue` (int, mg/dL), `egvTimestamp` |
-| **Basal** | `LidBasalDelivery` | 6,648 | 302 | `commandedRate` (float, **milliunits/hr — see §5**), `commandedRateSource` |
+| **Basal** | `LidBasalDelivery` | 6,648 | 302 | `commandedRate` (float, **milliunits/hr — see §6**), `commandedRateSource` |
 | **Bolus** | `LidBolusDelivery` | 420 | 19 | Delivery progress events |
 | **Bolus** | `LidBolusCompleted` | 211 | 9.6 | `insulindelivered` (float, units), `bolusid`, `IOB` |
-| **Bolus** | `LidBolusRequestedMsg1` | 211 | 9.6 | `carbamount` (int, **see §5**), `BG` (int, mg/dL), `IOB` (float) |
+| **Bolus** | `LidBolusRequestedMsg1` | 211 | 9.6 | `carbamount` (int, **see §6**), `BG` (int, mg/dL), `IOB` (float) |
 | **Bolus** | `LidBolusRequestedMsg2` | 211 | 9.6 | `useroverride`, `declinedcorrection`, `OptionsMap` |
 | **Bolus** | `LidBolusRequestedMsg3` | 211 | 9.6 | `totalRequestedInsulin` (float) |
 | **Bolus** | `LidBolusActivated` | 210 | 9.5 | Bolus start marker |
@@ -216,7 +216,7 @@ Additional Msg2 fields: `declinedcorrectionRaw` (0=no, 1=user declined correctio
 | Column | Type | Source Field | Notes |
 |---|---|---|---|
 | timestamp | datetime64[tz] | `eventTimestamp.datetime` | |
-| commanded_rate | float | `commandedRate / 1000` | **Must divide by 1000 — see §5 Bug 2** |
+| commanded_rate | float | `commandedRate / 1000` | **Must divide by 1000 — see §6 Bug 2** |
 
 **`events_df`** — Non-bolus pump events (site changes, mode changes, CGM sessions, etc.)
 
@@ -285,7 +285,89 @@ All four functions are side-effect-free: no API calls, no I/O, no config mutatio
 
 ---
 
-## 4. Source 3: pydexcom (Planned)
+## 4. Detection outputs
+
+Schemas returned by the `detection/` package (see `TECHNICAL_SPEC.md` "Detection Logic" for the algorithms). All functions are pure, source-agnostic, and DataFrame-in / DataFrame-out; they consume the normalized / enriched frames of §3.5 and §3.6 plus an `AppConfig`.
+
+### 4.1 `detect_anomalies` (detection/anomaly.py)
+
+Input: `cgm_df` (shape: §3.5 `cgm_df`, plus the `backfilled` bool column), `AppConfig`.
+
+Output: one row per anomalous CGM event.
+
+| Column | Type | Notes |
+|---|---|---|
+| timestamp | datetime64[tz] | Sensor timestamp of the event (mirrors `cgm_df.timestamp`, including backfilled rows) |
+| anomaly_type | str | One of `"spike"`, `"drop"`, `"flatline"` |
+| bg_at_event | int64 | BG at the flagged reading (mg/dL) |
+| rate_mgdl_per_min | float64 | Slope into the event `(bg − prev_bg) / Δt_min`. `0.0` for flatline rows. |
+| confidence | float64 | v1 heuristic in `[0, 1]`; placeholder — use for ordering only, not calibration |
+| is_backfilled_context | bool | Mirrors the source reading's `backfilled` flag; surfaces can segregate historical-only events |
+
+### 4.2 `detect_meals` (detection/meal.py)
+
+Input: `cgm_df` (§3.5), enriched `requests_df` (§3.5, including `bolus_category`), `AppConfig`.
+
+Output: one row per detected missed meal (sustained BG rise without a food-carrying bolus in the lookback window).
+
+| Column | Type | Notes |
+|---|---|---|
+| timestamp | datetime64[tz] | Run start (the first CGM timestamp of the sustained rise) |
+| bg_start | int64 | BG at the reading immediately before `timestamp` (the baseline that started the rise) |
+| bg_peak | int64 | Max BG in `[timestamp, timestamp + 2h]`, clipped to available data |
+| rise_rate_per_5min | float64 | Mean of the `sustained_intervals` per-interval deltas in the detected run (mg/dL per 5-min interval) |
+| meal_window | str | `"window_0"`, `"window_1"`, … positionally keyed to `meal_detection.meal_windows` in YAML; `"off_window"` for rises outside any window |
+| confidence | float64 | v1 heuristic in `[0, 1]`; placeholder — use for ordering only, not calibration |
+
+### 4.3 `daily_features` (detection/features.py)
+
+Input: `frames` dict (keys `cgm`, `bolus`, `basal`, `requests`, `alarms`, `suspension`, `cgm_gaps`), `datetime.date`, `AppConfig`.
+
+Output: a `dict` of 16 keys (one row of features for the given day).
+
+Day boundaries use `config.ingestion.timezone`. Empty-frame defaults: counts/sums → `0`, ratios/means → `NaN` (undefined, not zero). `std_bg` uses `ddof=0`.
+
+| Key | Type | Definition |
+|---|---|---|
+| date | `datetime.date` | The date being summarized (same value passed in) |
+| tir_70_180 | float | Fraction of CGM readings in `[bg_targets.low, bg_targets.high]` |
+| time_below_70 | float | Fraction of CGM readings below `bg_targets.low` |
+| time_above_180 | float | Fraction of CGM readings in `(bg_targets.high, 250]` |
+| time_above_250 | float | Fraction of CGM readings above 250 mg/dL |
+| mean_bg | float | Mean CGM BG across the day (mg/dL) |
+| std_bg | float | Population std (`ddof=0`) of CGM BG (mg/dL) |
+| cv_bg | float | `std_bg / mean_bg`; NaN when `mean_bg == 0` |
+| total_daily_insulin | float | Sum of bolus units plus basal integrated across the day (`commanded_rate × duration`); units |
+| basal_bolus_ratio | float | `basal_total / bolus_total`; NaN when no bolus |
+| meal_count | int | Count of `requests` rows with `bolus_category` in `{user_meal, user_meal_and_correction, override_up}` |
+| total_carbs_g | int | Sum of `carbs_g` across those meal rows (grams) |
+| overnight_dip | float | `mean(bg[04:00–06:00]) − mean(bg[00:00–02:00])` (mg/dL); NaN if either window is empty. Windows hardcoded in v1. |
+| mean_postprandial_peak | float | Mean Δ between the 2-hour post-bolus peak and the nearest-CGM-before-bolus anchor (10-min tolerance) across meal-category boluses; NaN when no meal rows have a nearby CGM anchor. Uses the CGM anchor — not `requests.bg_mgdl` — because the latter is a finger-stick and often 0/missing. |
+| alarm_count | int | Count of `alarms` rows with `action == "activated"` |
+| suspension_minutes | float | Total minutes of pump suspension overlap with the day window. Ongoing (unpaired) suspends are treated as ending at `day_end`. |
+| out_of_range_minutes | float | Total minutes of `cgm_gaps` overlap with the day window. `ongoing=True` gaps are treated as ending at `day_end`. |
+
+### 4.4 `cluster_days` (detection/clustering.py)
+
+Input: `features_df` (one row per day; must contain `date` plus numeric feature columns from §4.3), `AppConfig`, optional `retrain: bool = False`.
+
+Output:
+
+| Column | Type | Notes |
+|---|---|---|
+| date | same dtype as input | Passed through from `features_df.date` |
+| cluster_id | int64 | `KMeans.predict` label in `[0, clustering.n_clusters)` |
+| distance_to_centroid | float64 | Euclidean distance in the scaled feature space to the assigned centroid |
+
+Determinism: `clustering.random_seed` (default `42`) is passed to `KMeans(random_state=…)`; `n_init=10`. Model artefacts live in `clustering.model_dir` (default `data/models/`): `scaler_v1.pkl`, `kmeans_v1.pkl`, and `features_v1.json` (training-time column ordering — `predict` reorders the caller's feature matrix to match). `retrain=True` refits and overwrites; `retrain=False` with no saved model fits-and-warns (first-run ergonomics). NaNs are imputed per-batch with column median (all-NaN columns fall back to `0.0`); imputed columns are logged at WARNING level.
+
+### 4.5 `daily_clusters.parquet`
+
+Produced by the `cluster-days` CLI (`scripts/run_detection.py::run_clustering`). Identical schema to `cluster_days` output (§4.4); written to `data/processed/daily_clusters.parquet`. One row per day covered by the `--start` / `--end` range (defaults: earliest → latest CGM date).
+
+---
+
+## 5. Source 3: pydexcom (Planned)
 
 Not yet implemented. Will provide real-time Dexcom G7 CGM readings every 5 minutes via the Dexcom Share API.
 
@@ -296,7 +378,7 @@ Not yet implemented. Will provide real-time Dexcom G7 CGM readings every 5 minut
 
 ---
 
-## 5. Data Quality Issues
+## 6. Data Quality Issues
 
 ### Bug 1: `carbamount` is already in grams — do NOT divide by 1000 ✅ RESOLVED
 
@@ -334,7 +416,7 @@ Notebook `cgm_df` rows 2–3 show identical timestamps (`2026-02-26 21:08:27`) w
 
 ---
 
-## 6. Field → Use Case Mapping
+## 7. Field → Use Case Mapping
 
 | Use Case | Required Data | Source(s) | Key Fields |
 |---|---|---|---|
@@ -349,7 +431,7 @@ Notebook `cgm_df` rows 2–3 show identical timestamps (`2026-02-26 21:08:27`) w
 
 ---
 
-## 7. Open Questions
+## 8. Open Questions
 
 1. ~~**`carbamount` units**~~ — **RESOLVED.** Already in grams; do not divide by 1000.
 2. **Historical pump settings** — API only provides current settings. If ISF/carb ratio changed over time, historical bolus calculations may use stale parameters. Is there a way to get past profiles?
