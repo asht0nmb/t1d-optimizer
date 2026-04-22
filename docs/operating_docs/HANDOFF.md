@@ -334,3 +334,76 @@ In this order:
 ## What's Next
 
 Phase 3 — **Surfaces**. See the bottom of `docs/plans/2026-04-20-enrichment-and-detection-v1.md` (the OUT OF SCOPE block). Tentative filename: `docs/plans/YYYY-MM-DD-surfaces.md`. Covers pydexcom live feed, Telegram notifications (threshold + cooldown + message formatting), Streamlit dashboard, and real-time variants of the detection functions. The v1 detection API is intentionally pure DataFrame-in / DataFrame-out so the surface layer can wrap it without refactor.
+
+---
+
+# Handoff: Session 7 — Enrichment visibility in `check` / `viz`
+
+**Date:** 2026-04-21
+**Plan:** `docs/plans/2026-04-21-check-viz-enrichment-visibility.md`
+**Branch:** `feat/enrichment-detection-v1`
+
+## What Shipped
+
+`check` and `viz` now accept a `--view {original,enriched}` flag so enrichment (bolus_category / override_delta / forced_by_alarm / site_issues / cgm_gaps) is inspectable without changing the default output. Shared backfill logic now lives in **one** helper, reused by `scripts/run_detection.py`.
+
+| File | Change |
+|---|---|
+| `ingestion/view_data.py` | **new** — `VIEW_MODES`, `ENRICHED_COLUMNS`, `strip_enriched_columns`, `ensure_enriched`, `load_frames` |
+| `scripts/run_detection.py` | `_ensure_enriched` now delegates to `view_data.ensure_enriched` (no behavior change) |
+| `scripts/sanity_check.py` | `sanity_check(date_str, view="original")`; adds Bolus-category / Forced site-change / Site-issue / CGM-gap sections in enriched view |
+| `scripts/daily_viz.py` | `daily_viz(date_str, view="original")`; `_shade_oor_from_alarms` vs `_shade_oor_from_gaps`, forced-site differentiation, `site_issues` band, `bolus_category` cluster labels |
+| `main.py` | `--view` argparse choice on `check` and `viz` (default `original`) |
+| `tests/test_view_data.py` | **new** — 15 tests for the helper |
+| `tests/test_sanity_check.py` | **new** — 7 `capsys` tests for the CLI |
+| `tests/test_daily_viz.py` | **new** — 6 matplotlib smoke tests (`plt.show` mocked, `Agg` backend) |
+
+## View-Mode Behavior Table
+
+| Aspect | `--view original` (default) | `--view enriched` |
+|---|---|---|
+| Enrichment columns on disk | Hidden in print/plot via `strip_enriched_columns` | Preserved; backfilled in memory if absent |
+| `site_issues` / `cgm_gaps` | Shown only if present on disk | Always: built in memory from `alarms` when missing |
+| `check` sections | CGM / Bolus / Requests / Basal / TDD / Suspensions / Events / Alarms | + Bolus categories / Forced site changes / Site issues overlapping day / CGM gaps overlapping day |
+| `viz` CGM OOR shading | Alarm-pair derived (light gray, no hatch) | `cgm_gaps`-derived (dotted hatch); alarm-pair path **skipped** — no double-draw |
+| `viz` site change marker | Solid gray square | Hollow gray square + "site (forced)" label when `forced_by_alarm=True`; solid + "site" when `False` |
+| `viz` bolus panel extras | — | `bolus_category` label below each cluster; `site_issues` episodes drawn as a gold hatched band |
+| Header suffix | — | `[view: enriched]` appended |
+
+## Example Commands
+
+```bash
+# Default (pre-enrichment) behavior preserved byte-for-byte.
+uv run python main.py check --date 2026-03-19
+uv run python main.py viz   --date 2026-03-19
+
+# Enriched view: backfills bolus_category / forced_by_alarm / site_issues
+# / cgm_gaps in memory and prints/plots the extra sections.
+uv run python main.py check --date 2026-03-19 --view enriched
+uv run python main.py viz   --date 2026-03-19 --view enriched
+```
+
+Parquets on disk are never modified by either command — the enriched view is a pure projection.
+
+## Eyeball Checklist (viz)
+
+When comparing `viz --date 2026-03-19` original vs enriched:
+
+1. Header should end in `[view: enriched]` only in enriched mode.
+2. Gray shading on the CGM panel should appear **at most once per OOR episode**. If you see overlapping dotted-hatch and solid-gray spans, the single-source-of-truth rule was broken.
+3. The 08:06 post-shutdown site change should render as a hollow square in enriched mode (forced), solid in original.
+4. Bolus cluster markers should have a small italic category label (`user_meal`, `auto_correction`, …) below them in enriched mode only.
+5. A gold hatched band should appear on the bolus panel across the 22:36-ish occlusion cluster (if the day qualifies under `min_occlusions_for_cluster`).
+
+## Gotchas
+
+1. **"Original" is a projection, not byte-identical raw.** On pre-enrichment parquets the two views differ only in the extra sections/overlays. On already-enriched parquets, `original` still hides the enriched columns via `strip_enriched_columns` — this is the documented contract. See `view_data.ENRICHED_COLUMNS` for the exact column catalog.
+2. **`ensure_enriched` is the single backfill site.** `run_detection._ensure_enriched` is now a one-line delegate. If you change backfill semantics (e.g. different default for missing `site_issues`), change `ingestion/view_data.ensure_enriched` and every consumer picks it up.
+3. **Tests patch `load_df` inside `scripts.sanity_check` / `scripts.daily_viz`.** `sanity_check` and `daily_viz` call `load_df` directly (then call `ensure_enriched`) rather than going through `view_data.load_frames`, specifically so the existing `patch("scripts.sanity_check.load_df", ...)` style keeps working.
+4. **Viz smoke tests need `matplotlib.use("Agg")` before importing pyplot** — the fixture enforces this, don't remove the top-level backend hint.
+
+## Follow-Ups (not in this session)
+
+- `viz --compare` to render original + enriched side-by-side — deferred; the current differentiation is legible enough on a single figure.
+- Integration test against a real day in `data/processed/` asserting at least one enriched section appears in `check --view enriched` output (currently covered only by unit-level synthetic fixtures).
+- Automated visual regression (matplotlib `compare_images`) — not yet added; eyeball checklist above is the interim contract.
