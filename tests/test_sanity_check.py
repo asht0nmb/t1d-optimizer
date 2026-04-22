@@ -181,3 +181,27 @@ def test_sanity_check_rejects_invalid_view(day_frames) -> None:
     with _patch_load(day_frames):
         with pytest.raises(ValueError):
             sanity_check(TARGET_DATE, view="bogus")
+
+
+def test_sanity_check_tir_uses_config_bg_targets(capsys, day_frames, default_config) -> None:
+    """TIR line must read low/high from config, not hardcoded 70-180."""
+    expected_low = default_config.bg_targets.low
+    expected_high = default_config.bg_targets.high
+    with _patch_load(day_frames):
+        sanity_check(TARGET_DATE)
+    out = capsys.readouterr().out
+    assert f"Time in range ({expected_low}-{expected_high}):" in out
+
+
+def test_sanity_check_tir_reflects_custom_config(capsys, day_frames, monkeypatch) -> None:
+    """Changing bg_targets in the resolved config changes the printed header+pct."""
+    from types import SimpleNamespace
+
+    fake_config = SimpleNamespace(bg_targets=SimpleNamespace(low=80, high=200))
+    monkeypatch.setattr(
+        "scripts.sanity_check.get_config", lambda: fake_config
+    )
+    with _patch_load(day_frames):
+        sanity_check(TARGET_DATE)
+    out = capsys.readouterr().out
+    assert "Time in range (80-200):" in out

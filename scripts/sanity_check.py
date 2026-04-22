@@ -108,16 +108,22 @@ def sanity_check(date_str: str, view: ViewMode = "original") -> None:
     print(f"{'='*60}\n")
 
     frames = _load_all_frames(view)
+    # TIR band is config-driven (CLAUDE.md §Critical Rules); reading it here
+    # keeps the text summary in lockstep with `daily_viz` and the detection
+    # engine, all of which route through `detection.config.get_config`.
+    bg_targets = get_config().bg_targets
+    low = bg_targets.low
+    high = bg_targets.high
 
     # ── CGM ──────────────────────────────────────────────────────
     cgm = _filter_day(frames.get("cgm"), target)
     print(f"CGM readings: {len(cgm)}")
     if not cgm.empty:
         bg = cgm["bg_mgdl"]
-        tir = ((bg >= 70) & (bg <= 180)).mean() * 100
+        tir = ((bg >= low) & (bg <= high)).mean() * 100
         print(f"  Mean BG: {bg.mean():.0f} mg/dL")
         print(f"  Min/Max: {bg.min()} / {bg.max()} mg/dL")
-        print(f"  Time in range (70-180): {tir:.0f}%")
+        print(f"  Time in range ({low}-{high}): {tir:.0f}%")
         coverage = len(cgm) / 288 * 100
         print(f"  Coverage: {coverage:.0f}% ({len(cgm)}/288 expected)")
 
