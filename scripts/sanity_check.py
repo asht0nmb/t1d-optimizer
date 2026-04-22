@@ -1,17 +1,42 @@
 """Sanity check: load parquet files and print a human-readable summary for one day.
 
-Usage: uv run python main.py check --date 2026-03-20
+Usage:
+    uv run python main.py check --date 2026-03-20                 # original view
+    uv run python main.py check --date 2026-03-20 --view enriched  # + enrichment
+
+The `--view` flag is a read-only projection:
+
+* ``original`` — load parquets as-is, minus any enrichment columns that
+  happen to be present on disk. No extra sections are printed; output
+  matches the pre-enrichment behavior byte-for-byte on pre-enrichment data.
+* ``enriched`` — backfill `bolus_category` / `override_delta` /
+  `forced_by_alarm` / `site_issues` / `cgm_gaps` in memory if absent, then
+  print the base sections plus additional enrichment sections.
+
+The underlying parquets are never modified by `check`.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from datetime import date
+from typing import Iterable
 
 import pandas as pd
 
+from detection.config import get_config
 from ingestion.storage import load_df
+from ingestion.view_data import (
+    VIEW_MODES,
+    ViewMode,
+    ensure_enriched,
+    strip_enriched_columns,
+)
+
+_ALL_FRAMES: tuple[str, ...] = (
+    "cgm", "bolus", "requests", "basal", "suspension",
+    "events", "alarms", "site_issues", "cgm_gaps",
+)
 
 
 def _filter_day(df: pd.DataFrame | None, target: date, ts_col: str = "timestamp") -> pd.DataFrame:
@@ -22,14 +47,70 @@ def _filter_day(df: pd.DataFrame | None, target: date, ts_col: str = "timestamp"
     return df[mask]
 
 
-def sanity_check(date_str: str) -> None:
+def _overlapping_day(
+    df: pd.DataFrame | None,
+    target: date,
+    start_col: str,
+    end_col: str,
+) -> pd.DataFrame:
+    """Return rows whose [start, end] window touches ``target``.
+
+    Rows where ``end_col`` is NaT (ongoing episode) are treated as extending
+    indefinitely and are included when ``start <= end_of_day``.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    starts = pd.to_datetime(df[start_col])
+    ends = pd.to_datetime(df[end_col]) if end_col in df.columns else pd.Series(pd.NaT, index=df.index)
+
+    tz = getattr(starts.dt, "tz", None)
+    day_start = pd.Timestamp(target)
+    day_end = day_start + pd.Timedelta(days=1)
+    if tz is not None:
+        day_start = day_start.tz_localize(tz)
+        day_end = day_end.tz_localize(tz)
+
+    ongoing = ends.isna()
+    mask = ((starts < day_end) & (ends >= day_start)) | (ongoing & (starts < day_end))
+    return df[mask]
+
+
+def _load_all_frames(view: ViewMode) -> dict[str, pd.DataFrame]:
+    """Assemble the frame dict via the direct `load_df` path.
+
+    Kept in-module (rather than using `ingestion.view_data.load_frames`) so
+    tests can continue to patch `scripts.sanity_check.load_df`.
+    """
+    frames: dict[str, pd.DataFrame] = {}
+    for name in _ALL_FRAMES:
+        df = load_df(name)
+        frames[name] = df if df is not None else pd.DataFrame()
+
+    if view == "enriched":
+        config = get_config()
+        frames = ensure_enriched(frames, config)
+    else:  # original
+        for name in list(frames):
+            frames[name] = strip_enriched_columns(name, frames[name])
+    return frames
+
+
+def sanity_check(date_str: str, view: ViewMode = "original") -> None:
+    if view not in VIEW_MODES:
+        raise ValueError(
+            f"Unknown view mode {view!r}; expected one of {VIEW_MODES}"
+        )
+
     target = date.fromisoformat(date_str)
     print(f"\n{'='*60}")
-    print(f"  SANITY CHECK: {target}")
+    print(f"  SANITY CHECK: {target}  [view={view}]")
     print(f"{'='*60}\n")
 
+    frames = _load_all_frames(view)
+
     # ── CGM ──────────────────────────────────────────────────────
-    cgm = _filter_day(load_df("cgm"), target)
+    cgm = _filter_day(frames.get("cgm"), target)
     print(f"CGM readings: {len(cgm)}")
     if not cgm.empty:
         bg = cgm["bg_mgdl"]
@@ -41,7 +122,7 @@ def sanity_check(date_str: str) -> None:
         print(f"  Coverage: {coverage:.0f}% ({len(cgm)}/288 expected)")
 
     # ── Boluses ──────────────────────────────────────────────────
-    bolus = _filter_day(load_df("bolus"), target)
+    bolus = _filter_day(frames.get("bolus"), target)
     print(f"\nBoluses: {len(bolus)}")
     if not bolus.empty:
         print(f"  Total insulin: {bolus['insulin_units'].sum():.2f} u")
@@ -50,7 +131,7 @@ def sanity_check(date_str: str) -> None:
             print(f"    {ts}  {row['insulin_units']:.2f}u  (id={row['bolus_id']})")
 
     # ── Meals / bolus requests ───────────────────────────────────
-    requests = _filter_day(load_df("requests"), target)
+    requests = _filter_day(frames.get("requests"), target)
     meals = requests[requests["carbs_g"] > 0] if not requests.empty else pd.DataFrame()
     print(f"\nBolus requests: {len(requests)}  |  Meals (carbs > 0): {len(meals)}")
     if not meals.empty:
@@ -61,8 +142,9 @@ def sanity_check(date_str: str) -> None:
             print(f"    {ts}  {row['carbs_g']}g  BG={row['bg_mgdl']}  source={src}")
 
     # ── Basal ────────────────────────────────────────────────────
-    basal = _filter_day(load_df("basal"), target)
+    basal = _filter_day(frames.get("basal"), target)
     print(f"\nBasal entries: {len(basal)}")
+    tdd_basal = 0.0
     if not basal.empty:
         # Each entry covers 5 min; total daily dose = sum(rate * 5/60)
         tdd_basal = (basal["commanded_rate"] * 5 / 60).sum()
@@ -78,7 +160,7 @@ def sanity_check(date_str: str) -> None:
         print(f"\n  Total Daily Dose: {tdd:.2f} u (bolus={tdd_bolus:.2f} + basal={tdd_basal:.2f})")
 
     # ── Suspensions ──────────────────────────────────────────────
-    suspension = _filter_day(load_df("suspension"), target, ts_col="suspend_timestamp")
+    suspension = _filter_day(frames.get("suspension"), target, ts_col="suspend_timestamp")
     print(f"\nSuspensions: {len(suspension)}")
     if not suspension.empty:
         for _, row in suspension.iterrows():
@@ -90,7 +172,7 @@ def sanity_check(date_str: str) -> None:
             print(f"    {ts}  {dur}  reason={row['suspend_reason']}{alarm_str}{suspect}")
 
     # ── Events (mode changes, site changes) ──────────────────────
-    events = _filter_day(load_df("events"), target)
+    events = _filter_day(frames.get("events"), target)
     if not events.empty:
         mode_changes = events[events["event_type"] == "mode_change"]
         site_changes = events[events["event_type"] == "site_change"]
@@ -109,7 +191,7 @@ def sanity_check(date_str: str) -> None:
                 print(f"    {ts}  {row['event_subtype']}")
 
     # ── Alarms ─────────────────────────────────────────────────
-    alarms = _filter_day(load_df("alarms"), target)
+    alarms = _filter_day(frames.get("alarms"), target)
     if not alarms.empty:
         activated = alarms[alarms["action"] == "activated"]
         print(f"\nAlarms/Alerts: {len(activated)} activated ({len(alarms)} total)")
@@ -121,11 +203,100 @@ def sanity_check(date_str: str) -> None:
             p2 = f"  param2={row['param2']:.0f}" if pd.notna(row.get("param2")) else ""
             print(f"    {ts}  [{cat}] {name}{p1}{p2}")
 
+    # ── Enrichment-only sections ─────────────────────────────────
+    if view == "enriched":
+        _print_enriched_sections(requests, events, frames, target)
+
     print(f"\n{'='*60}\n")
 
 
+def _print_enriched_sections(
+    requests_day: pd.DataFrame,
+    events_day: pd.DataFrame,
+    frames: dict[str, pd.DataFrame],
+    target: date,
+) -> None:
+    """Print the additional sections the enriched view adds."""
+    # ── Bolus categories (requests) ──────────────────────────────
+    if not requests_day.empty and "bolus_category" in requests_day.columns:
+        print(f"\nBolus categories: {len(requests_day)}")
+        cat_counts = requests_day["bolus_category"].value_counts(dropna=False)
+        for cat, cnt in cat_counts.items():
+            print(f"    {cat}: {cnt}")
+        for _, row in requests_day.iterrows():
+            ts = pd.to_datetime(row["timestamp"]).strftime("%H:%M")
+            cat = row.get("bolus_category", "?")
+            src = row.get("bolus_source", "?")
+            delta = row.get("override_delta")
+            delta_str = ""
+            if pd.notna(delta):
+                delta_str = f"  override_delta={delta:+.2f}u"
+            print(f"    {ts}  source={src}  category={cat}{delta_str}")
+
+    # ── Forced site changes ─────────────────────────────────────
+    site_changes = (
+        events_day[events_day["event_type"] == "site_change"]
+        if not events_day.empty
+        else pd.DataFrame()
+    )
+    if not site_changes.empty and "forced_by_alarm" in site_changes.columns:
+        print(f"\nForced site changes (enriched): {len(site_changes)}")
+        for _, row in site_changes.iterrows():
+            ts = pd.to_datetime(row["timestamp"]).strftime("%H:%M")
+            forced = row.get("forced_by_alarm")
+            forced_str = "forced=True" if forced is True else "forced=False"
+            print(f"    {ts}  {row['event_subtype']}  {forced_str}")
+
+    # ── Site issues overlapping the day ──────────────────────────
+    site_issues = frames.get("site_issues")
+    overlapping_issues = _overlapping_day(
+        site_issues, target,
+        start_col="first_occlusion_ts", end_col="last_occlusion_ts",
+    )
+    print(f"\nSite issues overlapping day: {len(overlapping_issues)}")
+    if not overlapping_issues.empty:
+        for _, row in overlapping_issues.iterrows():
+            first = pd.to_datetime(row["first_occlusion_ts"]).strftime("%Y-%m-%d %H:%M")
+            last = pd.to_datetime(row["last_occlusion_ts"]).strftime("%H:%M")
+            cnt = int(row["occlusion_count"])
+            resolver = row.get("resolved_by_site_change_ts")
+            resolver_str = (
+                pd.to_datetime(resolver).strftime("%Y-%m-%d %H:%M")
+                if pd.notna(resolver) else "unresolved"
+            )
+            delay = row.get("resolution_delay_minutes")
+            delay_str = f"  delay={delay:.0f}min" if pd.notna(delay) else ""
+            print(
+                f"    {first} → {last}  occlusions={cnt}  "
+                f"resolved_at={resolver_str}{delay_str}"
+            )
+
+    # ── CGM gaps overlapping the day ─────────────────────────────
+    cgm_gaps = frames.get("cgm_gaps")
+    overlapping_gaps = _overlapping_day(
+        cgm_gaps, target,
+        start_col="start_ts", end_col="end_ts",
+    )
+    print(f"\nCGM gaps overlapping day: {len(overlapping_gaps)}")
+    if not overlapping_gaps.empty:
+        for _, row in overlapping_gaps.iterrows():
+            start = pd.to_datetime(row["start_ts"]).strftime("%Y-%m-%d %H:%M")
+            end_ts = row.get("end_ts")
+            end = pd.to_datetime(end_ts).strftime("%H:%M") if pd.notna(end_ts) else "ongoing"
+            dur = row.get("duration_minutes")
+            dur_str = f"{dur:.0f}min" if pd.notna(dur) else "ongoing"
+            print(f"    {start} → {end}  duration={dur_str}")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python scripts/sanity_check.py YYYY-MM-DD")
+    args: Iterable[str] = sys.argv[1:]
+    if not args:
+        print("Usage: python scripts/sanity_check.py YYYY-MM-DD [--view original|enriched]")
         sys.exit(1)
-    sanity_check(sys.argv[1])
+    args_list = list(args)
+    view: ViewMode = "original"
+    if "--view" in args_list:
+        i = args_list.index("--view")
+        view = args_list[i + 1]  # type: ignore[assignment]
+        del args_list[i:i + 2]
+    sanity_check(args_list[0], view=view)

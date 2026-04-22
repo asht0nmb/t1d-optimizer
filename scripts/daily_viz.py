@@ -1,6 +1,25 @@
 """Daily visualization: multi-panel chart modeled after the Tandem t:connect app.
 
-Usage: uv run python main.py viz --date 2026-03-19
+Usage:
+    uv run python main.py viz --date 2026-03-19
+    uv run python main.py viz --date 2026-03-19 --view enriched
+
+View modes:
+
+* ``original`` (default) — historical panels, CGM OOR shading derived from
+  raw `cgm_out_of_range` alarm pairs. Matches pre-enrichment visual intent
+  for regression comparisons.
+* ``enriched`` — draws the same panels plus these overlays:
+  - CGM gap shading comes from the ``cgm_gaps`` frame (single source of
+    truth); the raw alarm-pair shading is skipped so we never double-draw.
+  - Site-change markers distinguish forced (`forced_by_alarm=True`, hollow
+    gray square with "(forced)" label) from real site rotations.
+  - Bolus clusters annotated with the dominant `bolus_category` when
+    available.
+  - `site_issues` episodes drawn as a subtle hatched band on the bolus
+    panel at `[first_occlusion_ts, last_occlusion_ts]`.
+
+The underlying parquets are never modified by `viz`.
 """
 
 from __future__ import annotations
@@ -14,7 +33,14 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from detection.config import get_config
 from ingestion.storage import load_df
+from ingestion.view_data import (
+    VIEW_MODES,
+    ViewMode,
+    ensure_enriched,
+    strip_enriched_columns,
+)
 
 # ── Colors ──────────────────────────────────────────────────────────
 C_GREEN = "#4CAF50"
@@ -140,20 +166,187 @@ def _find_peaks(cgm: pd.DataFrame, min_prominence: int = 30) -> pd.DataFrame:
     return pd.DataFrame(result)
 
 
-def daily_viz(date_str: str) -> None:
+def _to_plot_datetime(ts: pd.Timestamp) -> datetime:
+    """Project a timestamp onto the arbitrary x-axis day (2000-01-01)."""
+    ts = pd.to_datetime(ts)
+    return datetime(2000, 1, 1, ts.hour, ts.minute, ts.second)
+
+
+def _shade_oor_from_alarms(ax, alarms: pd.DataFrame, day_end: datetime) -> None:
+    """Original-view strategy: derive OOR spans from raw alarm pairs."""
+    if alarms.empty:
+        return
+    oor_act = alarms[
+        (alarms["alarm_name"] == "cgm_out_of_range") & (alarms["action"] == "activated")
+    ].sort_values("timestamp")
+    oor_clr = alarms[
+        (alarms["alarm_name"] == "cgm_out_of_range") & (alarms["action"] == "cleared")
+    ].sort_values("timestamp")
+    for _, act_row in oor_act.iterrows():
+        act_ts = pd.to_datetime(act_row["timestamp"])
+        act_t = _to_plot_datetime(act_ts)
+        cleared_after = oor_clr[pd.to_datetime(oor_clr["timestamp"]) > act_ts]
+        if not cleared_after.empty:
+            clr_ts = pd.to_datetime(cleared_after.iloc[0]["timestamp"])
+            clr_t = _to_plot_datetime(clr_ts)
+        else:
+            clr_t = day_end
+        ax.axvspan(act_t, clr_t, alpha=0.06, color="gray")
+
+
+def _shade_oor_from_gaps(ax, cgm_gaps: pd.DataFrame, day_end: datetime) -> None:
+    """Enriched-view strategy: draw CGM-blind windows from the `cgm_gaps` frame.
+
+    `cgm_gaps` already represents paired activated/cleared transitions, so this
+    is a one-pass loop with no re-derivation. Single source of truth — when
+    this is called we intentionally *skip* `_shade_oor_from_alarms` to avoid
+    double-drawing the same windows in two colors.
+    """
+    if cgm_gaps is None or cgm_gaps.empty:
+        return
+    for _, row in cgm_gaps.iterrows():
+        start_ts = pd.to_datetime(row["start_ts"])
+        start_t = _to_plot_datetime(start_ts)
+        end_ts = row.get("end_ts")
+        if pd.notna(end_ts):
+            end_t = _to_plot_datetime(pd.to_datetime(end_ts))
+        else:
+            end_t = day_end
+        ax.axvspan(start_t, end_t, alpha=0.10, color="gray", hatch="...")
+
+
+def _draw_site_issue_band(ax, site_issues_day: pd.DataFrame, day_end: datetime) -> None:
+    """Hatch a subtle band on the bolus panel for occlusion clusters on the day."""
+    if site_issues_day is None or site_issues_day.empty:
+        return
+    for _, row in site_issues_day.iterrows():
+        start_t = _to_plot_datetime(pd.to_datetime(row["first_occlusion_ts"]))
+        last_ts = row.get("last_occlusion_ts")
+        end_t = (
+            _to_plot_datetime(pd.to_datetime(last_ts))
+            if pd.notna(last_ts) else day_end
+        )
+        ax.axvspan(
+            start_t, end_t, ymin=0.02, ymax=0.22,
+            alpha=0.25, facecolor="#FFD54F", edgecolor="#F57F17",
+            hatch="xxx", linewidth=0.5,
+        )
+
+
+def _annotate_bolus_categories(
+    ax,
+    clusters: list[dict],
+    requests: pd.DataFrame,
+) -> None:
+    """Label each bolus cluster with the bolus_category of its matched request.
+
+    When multiple requests fall inside the ±5 min window, pick the one with
+    the largest `total_requested` as the representative. Silently no-op when
+    the requests frame doesn't carry `bolus_category` (caller is responsible
+    for the `view="enriched"` guard).
+    """
+    if requests is None or requests.empty or "bolus_category" not in requests.columns:
+        return
+    req_ts = pd.to_datetime(requests["timestamp"])
+    for cl in clusters:
+        cl_ts = cl["time"]
+        window_mask = (
+            (req_ts >= cl_ts - pd.Timedelta(minutes=5))
+            & (req_ts <= cl_ts + pd.Timedelta(minutes=5))
+        )
+        matched = requests[window_mask]
+        if matched.empty:
+            continue
+        rep = matched.sort_values("total_requested", ascending=False).iloc[0]
+        category = rep.get("bolus_category")
+        if not isinstance(category, str) or not category:
+            continue
+        t = _to_plot_datetime(cl_ts)
+        ax.annotate(
+            category, xy=(t, 2.0), xytext=(0, -14),
+            textcoords="offset points", fontsize=7,
+            color="#455A64", ha="center", style="italic",
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="white",
+                      edgecolor="#90A4AE", alpha=0.85, linewidth=0.5),
+        )
+
+
+def _overlap_with_day(
+    df: pd.DataFrame | None,
+    target: date,
+    start_col: str,
+    end_col: str,
+) -> pd.DataFrame:
+    """Return rows in ``df`` whose [start, end] window touches ``target``."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    starts = pd.to_datetime(df[start_col])
+    ends = pd.to_datetime(df[end_col]) if end_col in df.columns else pd.Series(pd.NaT, index=df.index)
+    tz = getattr(starts.dt, "tz", None)
+    day_start = pd.Timestamp(target)
+    day_end = day_start + pd.Timedelta(days=1)
+    if tz is not None:
+        day_start = day_start.tz_localize(tz)
+        day_end = day_end.tz_localize(tz)
+    ongoing = ends.isna()
+    mask = ((starts < day_end) & (ends >= day_start)) | (ongoing & (starts < day_end))
+    return df[mask]
+
+
+def _prepare_frames(
+    target: date, view: ViewMode
+) -> dict[str, pd.DataFrame]:
+    """Load + project every frame the visualization uses for ``target``.
+
+    Central to keep original vs enriched projection consistent with
+    `sanity_check`. Only the day-slice happens here; overlap tables
+    (site_issues / cgm_gaps) are returned whole because their rows span days.
+    """
+    names = ("cgm", "bolus", "requests", "basal", "suspension",
+             "events", "alarms", "site_issues", "cgm_gaps")
+    raw: dict[str, pd.DataFrame] = {}
+    for name in names:
+        df = load_df(name)
+        raw[name] = df if df is not None else pd.DataFrame()
+
+    if view == "enriched":
+        config = get_config()
+        raw = ensure_enriched(raw, config)
+    else:
+        for name in list(raw):
+            raw[name] = strip_enriched_columns(name, raw[name])
+
+    return raw
+
+
+def daily_viz(date_str: str, view: ViewMode = "original") -> None:
+    if view not in VIEW_MODES:
+        raise ValueError(
+            f"Unknown view mode {view!r}; expected one of {VIEW_MODES}"
+        )
+
     target = date.fromisoformat(date_str)
     config = _load_config()
     low = config["bg_targets"]["low"]
     high = config["bg_targets"]["high"]
 
-    # Load data
-    cgm = _filter_day(load_df("cgm"), target)
-    bolus = _filter_day(load_df("bolus"), target)
-    requests = _filter_day(load_df("requests"), target)
-    basal = _filter_day(load_df("basal"), target)
-    suspension = _filter_day(load_df("suspension"), target, ts_col="suspend_timestamp")
-    events = _filter_day(load_df("events"), target)
-    alarms = _filter_day(load_df("alarms"), target)
+    frames = _prepare_frames(target, view)
+
+    cgm = _filter_day(frames["cgm"], target)
+    bolus = _filter_day(frames["bolus"], target)
+    requests = _filter_day(frames["requests"], target)
+    basal = _filter_day(frames["basal"], target)
+    suspension = _filter_day(frames["suspension"], target, ts_col="suspend_timestamp")
+    events = _filter_day(frames["events"], target)
+    alarms = _filter_day(frames["alarms"], target)
+    site_issues_day = _overlap_with_day(
+        frames.get("site_issues"), target,
+        start_col="first_occlusion_ts", end_col="last_occlusion_ts",
+    )
+    cgm_gaps_day = _overlap_with_day(
+        frames.get("cgm_gaps"), target,
+        start_col="start_ts", end_col="end_ts",
+    )
 
     if cgm.empty:
         print(f"No CGM data for {target}. Run: uv run python main.py fetch-day --date {date_str}")
@@ -188,13 +381,14 @@ def daily_viz(date_str: str) -> None:
 
     # ── Header ──────────────────────────────────────────────────────
     day_name = target.strftime("%A")
+    view_suffix = "    [view: enriched]" if view == "enriched" else ""
     header = (
         f"{day_name} - {target.strftime('%b %d, %Y')}        "
         f"Time in Range: {tir:.0f}%    "
         f"Avg: {avg_bg:.0f}mg/dL    "
         f"SD: {sd_bg:.0f}mg/dL    "
         f"TDI: {tdd:.1f}units    "
-        f"Carbs: {total_carbs:.0f}g"
+        f"Carbs: {total_carbs:.0f}g{view_suffix}"
     )
     fig.suptitle(header, fontsize=12, fontweight="bold", x=0.02, ha="left", y=0.97)
 
@@ -302,23 +496,11 @@ def daily_viz(date_str: str) -> None:
                 bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=C_RED, alpha=0.7),
             )
 
-        # CGM out-of-range spans (signal loss windows)
-        oor_act = alarms[
-            (alarms["alarm_name"] == "cgm_out_of_range") & (alarms["action"] == "activated")
-        ].sort_values("timestamp")
-        oor_clr = alarms[
-            (alarms["alarm_name"] == "cgm_out_of_range") & (alarms["action"] == "cleared")
-        ].sort_values("timestamp")
-        for _, act_row in oor_act.iterrows():
-            act_ts = pd.to_datetime(act_row["timestamp"])
-            act_t = datetime(2000, 1, 1, act_ts.hour, act_ts.minute, act_ts.second)
-            cleared_after = oor_clr[pd.to_datetime(oor_clr["timestamp"]) > act_ts]
-            if not cleared_after.empty:
-                clr_ts = pd.to_datetime(cleared_after.iloc[0]["timestamp"])
-                clr_t = datetime(2000, 1, 1, clr_ts.hour, clr_ts.minute, clr_ts.second)
-            else:
-                clr_t = day_end
-            ax_cgm.axvspan(act_t, clr_t, alpha=0.06, color="gray")
+    # CGM signal-loss shading — one strategy per view; never both.
+    if view == "enriched":
+        _shade_oor_from_gaps(ax_cgm, cgm_gaps_day, day_end)
+    else:
+        _shade_oor_from_alarms(ax_cgm, alarms, day_end)
 
     # ══════════════════════════════════════════════════════════════════
     # Panel 2: Bolus + Carbs + Events
@@ -407,7 +589,33 @@ def daily_viz(date_str: str) -> None:
         for _, row in site_changes.iterrows():
             ts = pd.to_datetime(row["timestamp"])
             t = datetime(2000, 1, 1, ts.hour, ts.minute, ts.second)
-            ax_bolus.scatter(t, 0.1, marker="s", s=40, c="gray", zorder=5, alpha=0.6)
+            # Enriched view differentiates forced (firmware-triggered refill after a
+            # BatteryShutdownAlarm) from real site rotations; original view draws
+            # them identically for visual-regression stability.
+            forced = row.get("forced_by_alarm") if view == "enriched" else None
+            if forced is True:
+                ax_bolus.scatter(
+                    t, 0.1, marker="s", s=48, facecolors="none",
+                    edgecolors="gray", linewidths=1.2, zorder=5, alpha=0.7,
+                )
+                ax_bolus.annotate(
+                    "site (forced)", xy=(t, 0.1), xytext=(0, -12),
+                    textcoords="offset points", fontsize=7, color="gray",
+                    ha="center", style="italic", alpha=0.8,
+                )
+            else:
+                ax_bolus.scatter(t, 0.1, marker="s", s=40, c="gray", zorder=5, alpha=0.6)
+                if view == "enriched" and forced is False:
+                    ax_bolus.annotate(
+                        "site", xy=(t, 0.1), xytext=(0, -12),
+                        textcoords="offset points", fontsize=7, color="dimgray",
+                        ha="center", alpha=0.8,
+                    )
+
+    # Enriched-only overlays: site_issue band + bolus_category labels.
+    if view == "enriched":
+        _draw_site_issue_band(ax_bolus, site_issues_day, day_end)
+        _annotate_bolus_categories(ax_bolus, clusters, requests)
 
     # ══════════════════════════════════════════════════════════════════
     # Panel 3: Basal Rate
@@ -495,7 +703,13 @@ def daily_viz(date_str: str) -> None:
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) != 2:
-        print("Usage: python scripts/daily_viz.py YYYY-MM-DD")
+    if len(sys.argv) < 2:
+        print("Usage: python scripts/daily_viz.py YYYY-MM-DD [--view original|enriched]")
         sys.exit(1)
-    daily_viz(sys.argv[1])
+    args = list(sys.argv[1:])
+    view: ViewMode = "original"
+    if "--view" in args:
+        i = args.index("--view")
+        view = args[i + 1]  # type: ignore[assignment]
+        del args[i:i + 2]
+    daily_viz(args[0], view=view)
