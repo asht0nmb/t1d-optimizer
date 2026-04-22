@@ -24,13 +24,8 @@ from detection.clustering import cluster_days
 from detection.config import AppConfig, get_config
 from detection.features import daily_features
 from detection.meal import detect_meals
-from ingestion.enrich import (
-    build_cgm_gaps_df,
-    build_site_issues_df,
-    enrich_events_df,
-    enrich_requests_df,
-)
 from ingestion.storage import PROCESSED_DIR, load_df
+from ingestion.view_data import ensure_enriched as _shared_ensure_enriched
 
 __all__ = ["run_anomalies", "run_meals", "run_clustering"]
 
@@ -91,44 +86,11 @@ def _ensure_enriched(
 ) -> dict[str, pd.DataFrame]:
     """Backfill enriched columns/frames when loading pre-enrichment parquets.
 
-    Parquets written before the enrichment pipeline landed (pre-commit 861379d)
-    lack bolus_category / override_delta / forced_by_alarm and are missing the
-    site_issues and cgm_gaps frames entirely. Detection functions require those,
-    so apply the same enrichment in-memory if columns are missing. The on-disk
-    parquets are untouched — the next fetch will persist enriched frames.
+    Thin delegate over `ingestion.view_data.ensure_enriched`. Detection and the
+    `check` / `viz` CLI share this one backfill path so they stay in lockstep
+    when the on-disk parquets predate the enrichment pipeline.
     """
-    out = dict(frames)
-    site_cfg = config.raw.get("site_change_detection", {})
-
-    requests = out.get("requests")
-    if (
-        requests is not None
-        and not requests.empty
-        and "bolus_category" not in requests.columns
-    ):
-        out["requests"] = enrich_requests_df(requests)
-
-    events = out.get("events")
-    alarms = out.get("alarms")
-    if (
-        events is not None
-        and not events.empty
-        and "forced_by_alarm" not in events.columns
-    ):
-        out["events"] = enrich_events_df(events, alarms, site_cfg)
-
-    if "site_issues" not in out or out["site_issues"] is None:
-        if alarms is not None and not alarms.empty:
-            out["site_issues"] = build_site_issues_df(
-                alarms, out.get("events"), site_cfg
-            )
-        else:
-            out["site_issues"] = pd.DataFrame()
-
-    if "cgm_gaps" not in out or out["cgm_gaps"] is None:
-        out["cgm_gaps"] = build_cgm_gaps_df(alarms)
-
-    return out
+    return _shared_ensure_enriched(frames, config)
 
 
 def run_anomalies(date_str: str) -> None:
