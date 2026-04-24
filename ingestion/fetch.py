@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 
-from .client import get_api, get_pump_metadata, fetch_pump_events
 from .builders import build_all
-from .storage import load_fetch_state, save_fetch_state, save_df, clean_all
+from .client import fetch_pump_events, get_api, get_pump_metadata
+from .enrich import load_config
+from .storage import clean_all, load_fetch_state, save_df, save_fetch_state
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ def run_full_fetch() -> None:
     api = get_api()
     metadata = get_pump_metadata(api)
     state = load_fetch_state()
+    config = load_config()
 
     logger.info("Found %d pumps on account", len(metadata))
 
@@ -27,7 +29,7 @@ def run_full_fetch() -> None:
         end = pump["maxDateWithEvents"][:10]
 
         logger.info("Pump %s: fetching full range %s → %s", serial, start, end)
-        _process_pump(api, device_id, serial, start, end, state)
+        _process_pump(api, device_id, serial, start, end, state, config)
 
     save_fetch_state(state)
     logger.info("Full fetch complete.")
@@ -38,6 +40,7 @@ def run_incremental_fetch() -> None:
     api = get_api()
     metadata = get_pump_metadata(api)
     state = load_fetch_state()
+    config = load_config()
 
     logger.info("Incremental update: %d pumps", len(metadata))
 
@@ -58,7 +61,7 @@ def run_incremental_fetch() -> None:
             start = (date.fromisoformat(last_end) - timedelta(days=1)).isoformat()
             logger.info("Pump %s: incremental from %s → %s", serial, start, max_date)
 
-        _process_pump(api, device_id, serial, start, max_date, state)
+        _process_pump(api, device_id, serial, start, max_date, state, config)
 
     save_fetch_state(state)
     logger.info("Incremental update complete.")
@@ -72,6 +75,7 @@ def run_day_fetch(date_str: str) -> None:
 
     api = get_api()
     metadata = get_pump_metadata(api)
+    config = load_config()
 
     # Use the most recent pump (last in sorted-by-minDate list)
     pump = metadata[-1]
@@ -87,7 +91,7 @@ def run_day_fetch(date_str: str) -> None:
         logger.info("No events returned for %s", date_str)
         return
 
-    dfs = build_all(events, serial)
+    dfs = build_all(events, serial, config)
     for name, df in dfs.items():
         if not df.empty:
             save_df(name, df)
@@ -103,6 +107,7 @@ def _process_pump(
     start: str,
     end: str,
     state: dict,
+    config: dict | None = None,
 ) -> None:
     """Fetch events for one pump, build all DataFrames, and save."""
     events, last_successful_end = fetch_pump_events(
@@ -113,8 +118,8 @@ def _process_pump(
         logger.info("Pump %s: no events returned", serial)
         return
 
-    # Build all DataFrames
-    dfs = build_all(events, serial)
+    # Build all DataFrames (enriched if config is provided)
+    dfs = build_all(events, serial, config)
 
     for name, df in dfs.items():
         if not df.empty:
