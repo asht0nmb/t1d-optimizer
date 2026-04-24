@@ -85,6 +85,11 @@ def main():
         help="End date (YYYY-MM-DD); defaults to latest CGM date",
     )
 
+    sub.add_parser(
+        "doctor",
+        help="Diagnose pipeline health (version, parquet presence, stacking)",
+    )
+
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -126,6 +131,10 @@ def main():
     elif args.command == "cluster-days":
         from scripts.run_detection import run_clustering
         run_clustering(args.retrain, args.start, args.end)
+
+    elif args.command == "doctor":
+        from scripts.doctor import doctor
+        doctor()
 
     else:
         parser.print_help()

@@ -81,5 +81,6 @@ The first 6 lines are a metadata header (device info, software version, report d
 
 - **Never hardcode thresholds or personal parameters.** All config lives in `config/user_config.yaml` (see `TECHNICAL_SPEC.md` for schema). Detection logic reads from config at runtime.
 - **Real-time detection uses trailing window only** — no future BG context available.
+- **Bump `ingestion.pipeline_version.PIPELINE_VERSION` (and add a changelog entry) whenever a builder or enricher changes output schema or timestamp semantics in a way that invalidates existing `data/processed/*.parquet`.** Run `uv run python main.py doctor` to confirm on-disk data matches the code.
 - Python 3.12+ required. Dependencies managed with `uv` (see `pyproject.toml`).
 - ML stack: scikit-learn, xgboost, lightgbm, statsmodels, scipy.

@@ -26,6 +26,7 @@ import pandas as pd
 
 from detection.config import get_config
 from ingestion.storage import load_df
+from ingestion.version_guard import warn_if_stale
 from ingestion.view_data import (
     VIEW_MODES,
     ViewMode,
@@ -103,6 +104,7 @@ def sanity_check(date_str: str, view: ViewMode = "original") -> None:
         )
 
     target = date.fromisoformat(date_str)
+    warn_if_stale(stream="stdout")
     print(f"\n{'='*60}")
     print(f"  SANITY CHECK: {target}  [view={view}]")
     print(f"{'='*60}\n")
@@ -212,8 +214,48 @@ def sanity_check(date_str: str, view: ViewMode = "original") -> None:
     # ── Enrichment-only sections ─────────────────────────────────
     if view == "enriched":
         _print_enriched_sections(requests, events, frames, target)
+        _print_stacking_heuristic(cgm)
 
     print(f"\n{'='*60}\n")
+
+
+_STACKING_THRESHOLD = 3
+
+
+def _print_stacking_heuristic(cgm_day: pd.DataFrame) -> None:
+    """Warn if the day's CGM has ≥N readings sharing the exact same second.
+
+    Enriched-only signal: surfaces the pre-v2 backfill bug's fingerprint
+    (bursts of backfilled readings collapsing onto the pump-reconnect
+    second) from inside a single-day check, even when nobody remembers to
+    run `doctor`.
+    """
+    if cgm_day is None or cgm_day.empty or "timestamp" not in cgm_day.columns:
+        return
+    timestamps = pd.to_datetime(cgm_day["timestamp"])
+    # See scripts/doctor.py — round-trip via UTC so DST-fallback days don't
+    # raise an ambiguous-time error inside the heuristic.
+    original_tz = timestamps.dt.tz
+    if original_tz is not None:
+        buckets = (
+            timestamps.dt.tz_convert("UTC")
+            .dt.floor("1s")
+            .dt.tz_convert(original_tz)
+        )
+    else:
+        buckets = timestamps.dt.floor("1s")
+    counts = buckets.value_counts()
+    stacked = counts[counts >= _STACKING_THRESHOLD]
+    if stacked.empty:
+        return
+    worst_ts = stacked.idxmax()
+    worst_n = int(stacked.max())
+    print(
+        f"\n⚠️  same-second CGM stacking: {len(stacked)} timestamp(s) "
+        f"have ≥{_STACKING_THRESHOLD} readings (worst: {worst_n} rows @ "
+        f"{worst_ts.strftime('%H:%M:%S')}). Pre-v2 backfill fingerprint — "
+        f"regenerate with `uv run python main.py fetch --clean`."
+    )
 
 
 def _print_enriched_sections(

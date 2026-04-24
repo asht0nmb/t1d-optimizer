@@ -20,7 +20,20 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 
+from ingestion import storage, version_guard  # noqa: E402
 from scripts.daily_viz import daily_viz  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_version_guard(tmp_path, monkeypatch):
+    """Keep real `data/processed/` parquets from firing a staleness warning."""
+    monkeypatch.setattr(storage, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(
+        storage, "PIPELINE_VERSION_FILE", tmp_path / ".pipeline_version.json"
+    )
+    version_guard.reset_cache()
+    yield
+    version_guard.reset_cache()
 
 
 TARGET_DATE = "2026-03-19"
