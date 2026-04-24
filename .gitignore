@@ -20,6 +20,7 @@ build/
 # Data files
 test_data/
 data/
+data/models/
 *.csv
 *.parquet
 *.h5
@@ -31,3 +32,7 @@ data/
 # IDE
 .vscode/
 .idea/
+
+# Runtime logs
+.fetch.log
+*.log

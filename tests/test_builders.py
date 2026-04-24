@@ -60,13 +60,31 @@ def _cgm(dt: datetime, bg: int, seq: int = 0) -> MagicMock:
     return e
 
 
+# tconnectsync's `egvTimestamp` is a raw UINT32 (`int # sec`) counted from
+# `TANDEM_EPOCH = 1199145600` (2008-01-01 UTC). The seconds are interpreted as
+# a *local-wall-clock* offset from that epoch (matching upstream's
+# `process_cgm_reading.timestamp_for`, which does `arrow.get(TANDEM_EPOCH +
+# egvTimestamp, tzinfo='UTC').replace(tzinfo=user_tz)` — i.e. components first,
+# label after). The fixture below mirrors that contract so backfill tests
+# exercise the real upstream type instead of a fabricated `.datetime`-having
+# wrapper.
+_TANDEM_EPOCH_NAIVE = datetime(2008, 1, 1)
+
+
+def _egv_seconds(dt_sensor: datetime) -> int:
+    """Encode `dt_sensor` (tz-aware) as the int the pump would emit."""
+    naive_wall = dt_sensor.replace(tzinfo=None)
+    return int((naive_wall - _TANDEM_EPOCH_NAIVE).total_seconds())
+
+
 def _cgm_backfill(dt_event, dt_sensor, bg, seq=0, data_type_raw=2):
     e = MagicMock(spec=LidCgmDataG7)
     e.eventTimestamp = _ts(dt_event)
     e.currentglucosedisplayvalue = bg
     e.seqNum = seq
     e.cgmDataTypeRaw = data_type_raw
-    e.egvTimestamp = _ts(dt_sensor)  # Arrow-like with .datetime
+    # Real upstream type: a plain int, NOT a wrapper with `.datetime`.
+    e.egvTimestamp = _egv_seconds(dt_sensor)
     return e
 
 
@@ -273,6 +291,37 @@ class TestBuildCgmDf:
         events = [_cgm(dt, 150, seq=1)]
         df = build_cgm_df(events, SERIAL)
         assert df.iloc[0]["timestamp"] == dt
+
+    def test_backfill_int_egvtimestamp_round_trips_to_sensor_dt(self):
+        """Regression for v2 stillborn fix: `egvTimestamp` is a raw `int`,
+        never a wrapper with `.datetime`. The builder must decode the int
+        through TANDEM_EPOCH + tz-replacement (mirroring upstream
+        `process_cgm_reading.timestamp_for`) and produce a tz-aware datetime
+        equal to the original sensor wall clock."""
+        dt_event = datetime(2026, 3, 20, 12, 3, 16, tzinfo=PST)
+        dt_sensor = datetime(2026, 3, 20, 9, 50, tzinfo=PST)
+        events = [_cgm_backfill(dt_event, dt_sensor, 200, seq=100)]
+        df = build_cgm_df(events, SERIAL)
+        ts = df.iloc[0]["timestamp"]
+        # Must be tz-aware and equal to dt_sensor in wall-clock + offset.
+        assert ts.tzinfo is not None
+        assert ts == dt_sensor
+        # sensor_timestamp keeps the pump-received wall clock.
+        assert df.iloc[0]["sensor_timestamp"] == dt_event
+
+    def test_backfill_int_egvtimestamp_zero_falls_back_to_event_time(self):
+        """A zero (or missing) egvTimestamp on a backfilled row is sentinel
+        for "no sensor time available"; we must fall back to eventTimestamp
+        rather than emitting 2008-01-01 garbage."""
+        dt_event = datetime(2026, 3, 20, 12, 3, 16, tzinfo=PST)
+        e = MagicMock(spec=LidCgmDataG7)
+        e.eventTimestamp = _ts(dt_event)
+        e.currentglucosedisplayvalue = 200
+        e.seqNum = 100
+        e.cgmDataTypeRaw = 2
+        e.egvTimestamp = 0
+        df = build_cgm_df([e], SERIAL)
+        assert df.iloc[0]["timestamp"] == dt_event
 
     def test_stale_reading_dropped(self):
         """Two readings 1s apart (different seqnums): keep first, drop stale second."""
