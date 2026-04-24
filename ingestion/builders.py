@@ -3,6 +3,7 @@
 import json
 import logging
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -70,27 +71,52 @@ _HANDLED_TYPES = (
 # 1. CGM
 # ---------------------------------------------------------------------------
 
+_TANDEM_EPOCH_NAIVE = datetime(2008, 1, 1)
+
+
+def _decode_egv_timestamp(egv_seconds: int, event_dt) -> "datetime | None":
+    """Decode `egvTimestamp` (raw `int # sec` since `TANDEM_EPOCH`) into a
+    tz-aware Python datetime in the same wall-clock TZ as `event_dt`.
+
+    Mirrors upstream `tconnectsync.sync.tandemsource.process_cgm_reading.timestamp_for`:
+    the seconds are added to `TANDEM_EPOCH` and the resulting wall clock is
+    *re-labeled* (not converted) into the user's local TZ. We don't import
+    `arrow`/`TANDEM_EPOCH` to keep the dependency surface small — they're
+    inlined as `_TANDEM_EPOCH_NAIVE` (2008-01-01).
+
+    Returns `None` for the documented sentinel `0` (no sensor time available).
+    """
+    if not isinstance(egv_seconds, int) or egv_seconds <= 0:
+        return None
+    naive_wall = _TANDEM_EPOCH_NAIVE + timedelta(seconds=egv_seconds)
+    tz = event_dt.tzinfo if event_dt is not None else None
+    return naive_wall.replace(tzinfo=tz) if tz is not None else naive_wall
+
+
 def build_cgm_df(events: list, pump_serial: str) -> pd.DataFrame:
     """Build CGM readings DataFrame from G7, Gxb, and FSL2 events.
 
-    For backfilled readings (cgmDataTypeRaw=2), uses the sensor reading time
-    (egvTimestamp) as the primary timestamp since these readings weren't
-    available to the pump in real time.
+    For backfilled readings (`cgmDataTypeRaw=2`) we use the sensor reading
+    time (`egvTimestamp`) as the primary timestamp since these readings
+    weren't available to the pump in real time. `egvTimestamp` is a raw
+    `int` (seconds since `TANDEM_EPOCH = 2008-01-01`), not a wrapper —
+    decoded via `_decode_egv_timestamp`.
     """
     rows = []
     for e in events:
         if isinstance(e, (LidCgmDataG7, LidCgmDataGxb, LidCgmDataFsl2)):
             data_type_raw = getattr(e, 'cgmDataTypeRaw', 1)
             is_backfill = data_type_raw == 2
+            event_dt = e.eventTimestamp.datetime
 
             egv_ts = getattr(e, 'egvTimestamp', None)
-            if is_backfill and egv_ts is not None:
-                # Backfilled: use actual sensor time, store pump-received time
-                timestamp = egv_ts.datetime
-                sensor_timestamp = e.eventTimestamp.datetime
+            sensor_dt = _decode_egv_timestamp(egv_ts, event_dt) if is_backfill else None
+            if is_backfill and sensor_dt is not None:
+                timestamp = sensor_dt
+                sensor_timestamp = event_dt
             else:
-                # Live: use pump-received time
-                timestamp = e.eventTimestamp.datetime
+                # Live, or backfill with no usable sensor time: pump-received time wins.
+                timestamp = event_dt
                 sensor_timestamp = None
 
             rows.append({
