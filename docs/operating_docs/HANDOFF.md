@@ -407,3 +407,51 @@ When comparing `viz --date 2026-03-19` original vs enriched:
 - `viz --compare` to render original + enriched side-by-side — deferred; the current differentiation is legible enough on a single figure.
 - Integration test against a real day in `data/processed/` asserting at least one enriched section appears in `check --view enriched` output (currently covered only by unit-level synthetic fixtures).
 - Automated visual regression (matplotlib `compare_images`) — not yet added; eyeball checklist above is the interim contract.
+
+
+---
+
+# Session 8 — Pipeline Version Guard
+
+**Date:** 2026-04-21
+**Branch:** `feat/enrichment-detection-v1`
+**Context:** post-Session 7 (enrichment visibility). Shipped a staleness detector so we never silently re-run `viz`/`check` against parquets produced by an older builder.
+
+## What landed
+
+- `ingestion/pipeline_version.py` — `PIPELINE_VERSION = 2` constant plus a `PIPELINE_VERSION_CHANGELOG` dict mapping each version to a short reason that invalidates earlier parquets. v1 = original build, v2 = `35041db` (backfilled CGM uses `egvTimestamp` + the whole enrichment layer).
+- `data/processed/.pipeline_version.json` sidecar written by every `save_df` call. `clean_all` removes it. `storage.read_pipeline_version()` returns `None` if missing or malformed (never crashes).
+- `ingestion/version_guard.py` — `check_pipeline_version()` returns a single-line warning (`None` when healthy). Result is cached per-process, so `run-all` scripts don’t spam. `reset_cache()` for tests.
+- `sanity_check`, `daily_viz`, and each `run_*` in `run_detection` call `warn_if_stale(stream="stdout")` at the top of their entry points.
+- New `main.py doctor` subcommand (`scripts/doctor.py`) prints: code version, on-disk sidecar version, which parquet tables are present, any staleness warning, and a same-second CGM stacking heuristic (≥3 rows sharing one second → flags the pre-v2 backfill bug fingerprint).
+- `sanity_check --view enriched` also runs the stacking heuristic, scoped to the target day.
+
+## Example
+
+```bash
+uv run python main.py doctor
+# code pipeline version: v2
+# on-disk pipeline version: v1
+# ⚠️  PIPELINE VERSION MISMATCH: on-disk data is v1, code is v2. Run `uv run python main.py fetch --clean` to regenerate data.
+
+uv run python main.py fetch --clean
+uv run python main.py doctor   # now silent / "pipeline state: OK"
+```
+
+## Bumping `PIPELINE_VERSION`
+
+Bump whenever a builder or enricher changes its output schema or timestamp semantics in a way that invalidates data in `data/processed/`. Steps:
+
+1. Increment `PIPELINE_VERSION` in `ingestion/pipeline_version.py`.
+2. Add a `PIPELINE_VERSION_CHANGELOG[new_version]` entry naming the commit and the semantic change.
+3. Run `uv run pytest -q` (the changelog-contiguity test will fail if you skip a key).
+4. Mention `fetch --clean` in your PR body so reviewers regenerate before testing.
+
+Cosmetic refactors (renames, type-only tightening) do not bump.
+
+## Gotchas
+
+1. **`save_df` writes the sidecar on every successful save.** This is deliberate — partial `fetch` runs still stamp the directory with the current code version, so a follow-up `fetch --update` starts from a known-good baseline.
+2. **The guard is cached per process.** Tests that need a stale state must call `version_guard.reset_cache()` after changing the sidecar.
+3. **Stacking threshold is conservative (≥3 rows/sec).** Dexcom never legitimately produces more than one reading per second, so ≥2 would also work; the higher floor cuts false positives on edge cases like duplicate-`seqnum` corner patches.
+4. **`doctor` is read-only.** It never wipes or re-fetches — just tells you what to run. This keeps the diagnostic safe to call anywhere.

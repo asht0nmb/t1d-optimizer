@@ -7,10 +7,28 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
+from ingestion import storage, version_guard
 from scripts.sanity_check import sanity_check
 
 
 TARGET_DATE = "2026-03-19"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_version_guard(tmp_path, monkeypatch):
+    """Point the version guard at a clean tmp dir so real stale parquets don't
+    leak into captured output.
+
+    Tests that need a stale state opt-in by re-pointing storage paths and
+    calling `version_guard.reset_cache()`.
+    """
+    monkeypatch.setattr(storage, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(
+        storage, "PIPELINE_VERSION_FILE", tmp_path / ".pipeline_version.json"
+    )
+    version_guard.reset_cache()
+    yield
+    version_guard.reset_cache()
 
 
 @pytest.fixture
@@ -205,3 +223,74 @@ def test_sanity_check_tir_reflects_custom_config(capsys, day_frames, monkeypatch
         sanity_check(TARGET_DATE)
     out = capsys.readouterr().out
     assert "Time in range (80-200):" in out
+
+
+def test_sanity_check_silent_on_healthy_pipeline(capsys, day_frames) -> None:
+    """Healthy staleness state must not emit a warning into check output."""
+    with _patch_load(day_frames):
+        sanity_check(TARGET_DATE)
+    combined = capsys.readouterr().out + capsys.readouterr().err
+    assert "PIPELINE VERSION MISMATCH" not in combined
+
+
+def test_sanity_check_warns_on_stale_pipeline(
+    capsys, day_frames, tmp_path
+) -> None:
+    """Unversioned parquet on disk → staleness warning prefixes the report."""
+    (tmp_path / "cgm.parquet").write_bytes(b"fake")
+    version_guard.reset_cache()
+    with _patch_load(day_frames):
+        sanity_check(TARGET_DATE)
+    out = capsys.readouterr().out
+    assert "PIPELINE VERSION MISMATCH" in out
+    assert "fetch --clean" in out
+
+
+def test_sanity_check_enriched_warns_on_same_second_stacking(capsys) -> None:
+    """Multiple CGM readings at the same second on the target day → warning."""
+    tz = "America/Los_Angeles"
+    burst = pd.Timestamp("2026-03-19 12:03:16", tz=tz)
+    stacked = [burst] * 6 + [
+        pd.Timestamp("2026-03-19 12:10", tz=tz),
+        pd.Timestamp("2026-03-19 12:15", tz=tz),
+    ]
+    cgm = pd.DataFrame({
+        "timestamp": stacked,
+        "bg_mgdl": list(range(100, 108)),
+        "seqnum": list(range(len(stacked))),
+        "pump_serial": ["p1"] * len(stacked),
+        "backfilled": [True] * 6 + [False, False],
+    })
+    frames = {"cgm": cgm, "requests": pd.DataFrame(), "events": pd.DataFrame()}
+
+    with _patch_load(frames):
+        sanity_check(TARGET_DATE, view="enriched")
+    out = capsys.readouterr().out
+    assert "same-second" in out.lower() or "stack" in out.lower()
+
+
+def test_sanity_check_enriched_silent_on_clean_cgm(capsys, day_frames) -> None:
+    """Clean one-reading-per-5-min CGM must not fire the stacking warning."""
+    with _patch_load(day_frames):
+        sanity_check(TARGET_DATE, view="enriched")
+    out = capsys.readouterr().out
+    assert "same-second CGM stacking" not in out
+
+
+def test_sanity_check_original_silent_on_stacking(capsys) -> None:
+    """Stacking warning is enriched-only; original view stays quiet."""
+    tz = "America/Los_Angeles"
+    burst = pd.Timestamp("2026-03-19 12:03:16", tz=tz)
+    stacked = [burst] * 6
+    cgm = pd.DataFrame({
+        "timestamp": stacked,
+        "bg_mgdl": list(range(100, 106)),
+        "seqnum": list(range(6)),
+        "pump_serial": ["p1"] * 6,
+        "backfilled": [True] * 6,
+    })
+    frames = {"cgm": cgm}
+    with _patch_load(frames):
+        sanity_check(TARGET_DATE, view="original")
+    out = capsys.readouterr().out
+    assert "same-second" not in out.lower()

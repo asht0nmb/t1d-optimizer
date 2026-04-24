@@ -35,6 +35,7 @@ import yaml
 
 from detection.config import get_config
 from ingestion.storage import load_df
+from ingestion.version_guard import warn_if_stale
 from ingestion.view_data import (
     VIEW_MODES,
     ViewMode,
@@ -326,6 +327,7 @@ def daily_viz(date_str: str, view: ViewMode = "original") -> None:
         )
 
     target = date.fromisoformat(date_str)
+    warn_if_stale(stream="stdout")
     config = _load_config()
     low = config["bg_targets"]["low"]
     high = config["bg_targets"]["high"]

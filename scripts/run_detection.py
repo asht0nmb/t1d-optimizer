@@ -25,6 +25,7 @@ from detection.config import AppConfig, get_config
 from detection.features import daily_features
 from detection.meal import detect_meals
 from ingestion.storage import PROCESSED_DIR, load_df
+from ingestion.version_guard import warn_if_stale
 from ingestion.view_data import ensure_enriched as _shared_ensure_enriched
 
 __all__ = ["run_anomalies", "run_meals", "run_clustering"]
@@ -95,6 +96,7 @@ def _ensure_enriched(
 
 def run_anomalies(date_str: str) -> None:
     """Load enriched CGM, slice to ``date_str``, run anomaly detection, print."""
+    warn_if_stale(stream="stdout")
     get_config.cache_clear()
     config = get_config()
     target = _parse_date(date_str)
@@ -116,6 +118,7 @@ def run_anomalies(date_str: str) -> None:
 
 def run_meals(date_str: str) -> None:
     """Load enriched CGM + requests, slice to ``date_str``, detect missed meals."""
+    warn_if_stale(stream="stdout")
     get_config.cache_clear()
     config = get_config()
     target = _parse_date(date_str)
@@ -167,12 +170,16 @@ def run_clustering(
 ) -> None:
     """Build daily features across the date range and cluster them.
 
+    The staleness warning fires once per process (via the cached guard) so
+    chaining `clustering` after `anomalies` / `meals` doesn't duplicate it.
+
     ``daily_features`` handles per-day slicing internally, so the full
     frames are passed on every iteration (plan §2.4). The fitted model
     is persisted via `detection.clustering.cluster_days`, and the
     resulting assignments are written to
     ``data/processed/daily_clusters.parquet``.
     """
+    warn_if_stale(stream="stdout")
     get_config.cache_clear()
     config = get_config()
 
