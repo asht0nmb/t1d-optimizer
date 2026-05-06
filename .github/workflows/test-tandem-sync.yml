@@ -1,0 +1,50 @@
+name: Test Tandem Sync (Smoke)
+
+# Spike workflow: validate that tconnectsync can authenticate and fetch
+# from a headless GitHub Actions runner. No persistence, no schedule.
+# Triggered manually only via the Actions tab.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        # Pinned to an exact version per upstream guidance: setup-uv v8 stopped
+        # publishing floating major tags (`@v8`/`@v6`) to harden against the
+        # tj-actions-style supply-chain class of attacks. Bump deliberately.
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run Tandem auth + fetch smoke test
+        env:
+          # Credentials are read by ingestion/client.py via os.getenv.
+          # Values must be defined in repo Settings → Secrets and variables → Actions.
+          TCONNECT_EMAIL: ${{ secrets.TCONNECT_EMAIL }}
+          TCONNECT_PASSWORD: ${{ secrets.TCONNECT_PASSWORD }}
+          # tconnectsync writes a `.creds_cache` file to cwd by default.
+          # Disable that cache in CI so no credential material ever lands
+          # on the runner filesystem.
+          CACHE_CREDENTIALS: "false"
+          # Disable buffered / colored output to keep CI logs clean.
+          PYTHONUNBUFFERED: "1"
+        run: uv run python scripts/ci_tandem_smoke.py
