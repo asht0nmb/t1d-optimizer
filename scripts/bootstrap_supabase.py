@@ -377,12 +377,17 @@ def insert_table(
         # issues exactly one INSERT statement and ``cur.rowcount`` is the
         # correct per-chunk inserted count (it would only reflect the
         # *last* statement if execute_values handled the chunking itself).
+        #
+        # Commit per chunk per Supabase short-transactions guidance: every
+        # chunk is durable, network blip / idle_in_transaction_session_timeout
+        # can't roll back the whole table, and ON CONFLICT DO NOTHING makes
+        # re-runs cheap.
         for start in range(0, len(rows), batch_size):
             chunk = rows[start:start + batch_size]
             execute_values(cur, sql, chunk, page_size=batch_size)
             inserted += cur.rowcount
+            conn.commit()
 
-    conn.commit()
     elapsed = time.perf_counter() - started
     skipped = parquet_rows - inserted
     return parquet_rows, inserted, skipped, elapsed
@@ -517,10 +522,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     logger.info("connecting to Supabase Postgres (direct, port 5432)")
-    conn = psycopg2.connect(db_url)
+    conn = psycopg2.connect(db_url, connect_timeout=10)
 
     failed: list[tuple[str, Exception]] = []
     report = []
+    interrupted = False
     try:
         for name in tables:
             try:
@@ -537,10 +543,20 @@ def main(argv: list[str] | None = None) -> int:
                 conn.rollback()
                 logger.exception("failed to load %s: %s", name, exc)
                 failed.append((name, exc))
+    except KeyboardInterrupt:
+        logger.warning(
+            "Interrupted by user; partial progress on this table is rolled back, "
+            "prior tables stay committed."
+        )
+        conn.rollback()
+        interrupted = True
     finally:
         conn.close()
 
     _print_report(report, dry_run=False)
+
+    if interrupted:
+        return 130
 
     if failed:
         names = ", ".join(name for name, _ in failed)
