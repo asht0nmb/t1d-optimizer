@@ -340,7 +340,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS alerts_sent_event_ref_uq
 COMMENT ON TABLE alerts_sent IS
     'Live-alert dedup state; one row per alert delivery attempt.';
 COMMENT ON INDEX alerts_sent_event_ref_uq IS
-    'Partial unique index on (alert_kind, event_ref) where event_ref IS NOT NULL; supports INSERT ... ON CONFLICT DO NOTHING for per-event idempotency while still allowing rows without an event_ref.';
+    'Partial unique index on (alert_kind, event_ref) where event_ref IS NOT NULL. Supports per-event idempotent inserts while still allowing rows without an event_ref. Postgres requires the predicate to be respecified in ON CONFLICT to match a partial index, so callers must write: INSERT INTO alerts_sent (...) VALUES (...) ON CONFLICT (alert_kind, event_ref) WHERE event_ref IS NOT NULL DO NOTHING. Rows with NULL event_ref are not deduped (each insert produces a new row), which is intentional.';
 COMMENT ON COLUMN alerts_sent.alert_kind IS
     'Alert kind identifier, e.g. anomaly_spike, missed_meal, site_failure.';
 COMMENT ON COLUMN alerts_sent.pump_serial IS
