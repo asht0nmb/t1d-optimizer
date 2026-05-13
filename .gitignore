@@ -1,8 +1,9 @@
 # Virtual environment
 .venv/
 
-# Env variables
+# Env variables (.env.example is checked in as a template)
 .env*
+!.env.example
 
 # Research with PHI
 research/
