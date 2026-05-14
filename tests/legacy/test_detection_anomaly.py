@@ -1,11 +1,13 @@
-"""Tests for `detection.anomaly.detect_anomalies`."""
+"""Tests for `detection.legacy.anomaly.detect_anomalies`."""
 
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
 
-from detection.anomaly import detect_anomalies
+from detection.legacy.anomaly import detect_anomalies
+
+pytestmark = pytest.mark.legacy
 
 
 PST = timezone(timedelta(hours=-8))

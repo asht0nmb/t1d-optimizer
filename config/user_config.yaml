@@ -8,6 +8,8 @@ bg_targets:
   high: 180
   target: 110
 
+# meal_detection / anomaly_detection / clustering blocks are consumed only by
+# detection/legacy/*. Safe to remove when legacy is retired.
 meal_detection:
   rise_threshold_per_5min: 8
   sustained_intervals: 3
