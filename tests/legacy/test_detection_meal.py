@@ -1,11 +1,13 @@
-"""Tests for `detection.meal.detect_meals`."""
+"""Tests for `detection.legacy.meal.detect_meals`."""
 
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
 
-from detection.meal import detect_meals
+from detection.legacy.meal import detect_meals
+
+pytestmark = pytest.mark.legacy
 
 
 PST = timezone(timedelta(hours=-8))

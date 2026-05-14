@@ -24,8 +24,10 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
+addopts = "-m 'not legacy'"
 markers = [
     "integration: marks tests that hit real API (deselect with '-m \"not integration\"')",
+    "legacy: tests for detection/legacy/* reference implementation; not part of the default run",
 ]
 
 [dependency-groups]

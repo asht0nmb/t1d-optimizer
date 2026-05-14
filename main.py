@@ -49,42 +49,6 @@ def main():
         ),
     )
 
-    anomalies_parser = sub.add_parser(
-        "analyze-anomalies",
-        help="Run CGM anomaly detection for a specific date",
-    )
-    anomalies_parser.add_argument(
-        "--date", required=True, help="Date to analyze (YYYY-MM-DD)"
-    )
-
-    meals_parser = sub.add_parser(
-        "analyze-meals",
-        help="Run missed-meal detection for a specific date",
-    )
-    meals_parser.add_argument(
-        "--date", required=True, help="Date to analyze (YYYY-MM-DD)"
-    )
-
-    cluster_parser = sub.add_parser(
-        "cluster-days",
-        help="Build daily features across a date range and cluster them",
-    )
-    cluster_parser.add_argument(
-        "--retrain",
-        action="store_true",
-        help="Refit the clustering pipeline instead of loading the saved model",
-    )
-    cluster_parser.add_argument(
-        "--start",
-        default=None,
-        help="Start date (YYYY-MM-DD); defaults to earliest CGM date",
-    )
-    cluster_parser.add_argument(
-        "--end",
-        default=None,
-        help="End date (YYYY-MM-DD); defaults to latest CGM date",
-    )
-
     sub.add_parser(
         "doctor",
         help="Diagnose pipeline health (version, parquet presence, stacking)",
@@ -119,18 +83,6 @@ def main():
     elif args.command == "viz":
         from scripts.daily_viz import daily_viz
         daily_viz(args.date, view=args.view)
-
-    elif args.command == "analyze-anomalies":
-        from scripts.run_detection import run_anomalies
-        run_anomalies(args.date)
-
-    elif args.command == "analyze-meals":
-        from scripts.run_detection import run_meals
-        run_meals(args.date)
-
-    elif args.command == "cluster-days":
-        from scripts.run_detection import run_clustering
-        run_clustering(args.retrain, args.start, args.end)
 
     elif args.command == "doctor":
         from scripts.doctor import doctor

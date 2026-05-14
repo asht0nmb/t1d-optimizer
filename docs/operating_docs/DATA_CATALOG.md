@@ -287,6 +287,8 @@ All four functions are side-effect-free: no API calls, no I/O, no config mutatio
 
 ## 4. Detection outputs
 
+> **Note (2026-05-13).** The algorithms described below now live in `detection/legacy/` as the reference v1 implementation. They are not the active detection engine — v2 is in design per `docs/plans/2026-05-05-detection-rework-and-surfaces.md`. The schemas in this section describe legacy output. This section will be rewritten when v2's first module ships on `main`.
+
 Schemas returned by the `detection/` package (see `TECHNICAL_SPEC.md` "Detection Logic" for the algorithms). All functions are pure, source-agnostic, and DataFrame-in / DataFrame-out; they consume the normalized / enriched frames of §3.5 and §3.6 plus an `AppConfig`.
 
 ### 4.1 `detect_anomalies` (detection/anomaly.py)

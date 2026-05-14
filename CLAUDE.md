@@ -29,11 +29,11 @@ uv run jupyter notebook research.ipynb
 The ingestion + enrichment + detection layers are in place; surfaces (Telegram / Streamlit / live pydexcom) are not yet built. Current layout:
 
 - `ingestion/` — tconnectsync client, per-event-type builders, enrichment (`bolus_category`, `forced_by_alarm`, `site_issues`, `cgm_gaps`), parquet storage, shared view-mode helper (`view_data.py`).
-- `detection/` — typed `AppConfig` + anomaly / missed-meal / daily-feature / KMeans clustering modules. Source-agnostic: pure DataFrame-in / DataFrame-out, no ingestion imports.
-- `scripts/` — CLI entry points: `sanity_check` (check), `daily_viz` (viz), `run_detection` (analyze-anomalies / analyze-meals / cluster-days).
-- `tests/` — 282 passing tests across builders, storage, enrichment, detection, and CLI.
+- `detection/` — typed `AppConfig` + `daily_features` patterns-layer foundation. Source-agnostic: pure DataFrame-in / DataFrame-out, no ingestion imports. v1 reference implementation (anomaly / meal / clustering) is quarantined under `detection/legacy/` — see its README.
+- `scripts/` — CLI entry points: `sanity_check` (check), `daily_viz` (viz), `doctor`.
+- `tests/` — 344 passing tests in the default suite across builders, storage, enrichment, detection features/config, and CLI. 47 additional `legacy`-marked tests cover `detection/legacy/*` and run opt-in via `uv run pytest -m legacy`.
 
-See `docs/operating_docs/HANDOFF.md` (the most recent Session entry) for what shipped last and what's next.
+When you finish a substantive change, write a dated `docs/updates/YYYY-MM-DD-*.md` entry rather than mutating prior updates. The dated trail is the audit log.
 
 ### Data Pipeline
 
@@ -71,14 +71,16 @@ The first 6 lines are a metadata header (device info, software version, report d
 - `data/` — real patient CSV exports and `data/processed/*.parquet` (do not commit new data files without asking)
 - `test_data/` — anonymized copies for testing
 - `ingestion/` — tconnectsync client, builders, enrichment, parquet storage, view-mode helper
-- `detection/` — typed config + anomaly / meal / features / clustering modules
-- `scripts/` — CLI entry points (`sanity_check`, `daily_viz`, `run_detection`)
-- `tests/` — pytest suite (282 passing, 1 skipped)
-- `docs/operating_docs/` — `HANDOFF.md`, `DATA_NOTES.md`, `DATA_ISSUES.md`, `DATA_NOTES_2.md`
+- `detection/` — typed config + `daily_features` patterns-layer foundation. `detection/legacy/` holds the v1 reference implementation (not maintained, not imported from production code).
+- `scripts/` — CLI entry points (`sanity_check`, `daily_viz`, `doctor`)
+- `tests/` — pytest suite (344 default, plus 47 legacy-marked tests opt-in via `-m legacy`)
+- `docs/operating_docs/` — `TECHNICAL_SPEC.md`, `DATA_CATALOG.md`, `DATA_NOTES.md`, `DATA_NOTES_2.md`, `DATA_ISSUES.md`, `api_levels.md`, `tconnectsync_api_map.md`
+- `docs/updates/` — dated session write-ups (`YYYY-MM-DD-*.md`); append-only audit log
 - `research.ipynb` — exploratory analysis notebook
 
 ## Critical Rules
 
+- **Do not extend `detection/legacy/`; do not import from it in production code.** v2 modules land at the top level of `detection/` (or `detection/v2/` if symmetry with legacy is preferred when v2 ships).
 - **Never hardcode thresholds or personal parameters.** All config lives in `config/user_config.yaml` (see `TECHNICAL_SPEC.md` for schema). Detection logic reads from config at runtime.
 - **Real-time detection uses trailing window only** — no future BG context available.
 - **Bump `ingestion.pipeline_version.PIPELINE_VERSION` (and add a changelog entry) whenever a builder or enricher changes output schema or timestamp semantics in a way that invalidates existing `data/processed/*.parquet`.** Run `uv run python main.py doctor` to confirm on-disk data matches the code.

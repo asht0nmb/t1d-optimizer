@@ -1,4 +1,4 @@
-"""Tests for ``detection.clustering.cluster_days``.
+"""Tests for ``detection.legacy.clustering.cluster_days``.
 
 Uses a deterministic synthetic feature DataFrame that mirrors the schema
 produced by ``detection.features.daily_features``. Each test points the
@@ -16,8 +16,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from detection.clustering import cluster_days
 from detection.config import AppConfig, ClusteringConfig
+from detection.legacy.clustering import cluster_days
+
+pytestmark = pytest.mark.legacy
 
 
 # Mirrors `daily_features` output (minus the `date` key). 16 feature columns.

@@ -25,6 +25,8 @@ A Python-based system that will ingest Type 1 diabetes device data (CGM + insuli
  
 ## Detection Logic
 
+> **Note (2026-05-13).** The algorithms described below now live in `detection/legacy/` as the reference v1 implementation. They are not the active detection engine — v2 is in design per `docs/plans/2026-05-05-detection-rework-and-surfaces.md`. The schemas in `DATA_CATALOG.md` §4 describe legacy output. This section will be rewritten when v2's first module ships on `main`.
+
 The detection engine lives in the `detection/` package and is source-agnostic — modules consume normalized DataFrames (shape defined in `DATA_CATALOG.md` §3.5) and an `AppConfig`, and never import from `ingestion/` or reference tconnectsync. Every threshold is config-driven; `detection.config.get_config()` is the single typed entry point (see `detection/config.py` for the `AppConfig` dataclass and its validators).
 
 Output schemas for each function are documented in `DATA_CATALOG.md` §4.
