@@ -1,102 +1,123 @@
-"""Parquet I/O, deduplication, and fetch-state tracking."""
+"""Backward-compatibility shim over :class:`core.storage.parquet.ParquetStorage`.
+
+Every public name from the pre-Protocol module is preserved (signature,
+return shape, on-disk behavior). Functions delegate to a per-process
+cached :class:`ParquetStorage` instance rooted at the module-level
+``PROCESSED_DIR``; if a test (or any other caller) reassigns
+``PROCESSED_DIR``, the cache rebuilds on the next call.
+
+New code should import :class:`core.storage.protocol.Storage` and
+accept it via dependency injection instead of going through this shim.
+The shim exists so the existing fetch / view / detection callers and
+the bootstrap script keep working unchanged on day one of Phase 1.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
+from core.storage.parquet import (
+    DEDUP_KEYS,
+    PARQUET_FILES,
+    PIPELINE_VERSION_FILENAME,
+    STATE_FILENAME,
+    ParquetStorage,
+)
 from ingestion.pipeline_version import PIPELINE_VERSION
 
 logger = logging.getLogger(__name__)
 
 # ── paths ────────────────────────────────────────────────────────────────────
 PROCESSED_DIR = Path("data/processed")
-STATE_FILE = PROCESSED_DIR / ".fetch_state.json"
-PIPELINE_VERSION_FILE = PROCESSED_DIR / ".pipeline_version.json"
+STATE_FILE = PROCESSED_DIR / STATE_FILENAME
+PIPELINE_VERSION_FILE = PROCESSED_DIR / PIPELINE_VERSION_FILENAME
 
-PARQUET_FILES: dict[str, str] = {
-    "cgm": "cgm.parquet",
-    "bolus": "bolus.parquet",
-    "requests": "requests.parquet",
-    "basal": "basal.parquet",
-    "suspension": "suspension.parquet",
-    "events": "events.parquet",
-    "alarms": "alarms.parquet",
-    "site_issues": "site_issues.parquet",
-    "cgm_gaps": "cgm_gaps.parquet",
-}
 
-DEDUP_KEYS: dict[str, list[str]] = {
-    "cgm": ["seqnum", "pump_serial"],
-    "bolus": ["bolus_id", "pump_serial"],
-    "requests": ["bolus_id", "pump_serial"],
-    "basal": ["timestamp", "pump_serial"],
-    "suspension": ["suspend_timestamp", "pump_serial"],
-    "events": ["pump_serial", "seqnum"],
-    "alarms": ["seqnum", "pump_serial"],
-    "site_issues": ["first_occlusion_ts", "pump_serial"],
-    "cgm_gaps": ["start_ts", "pump_serial"],
-}
+# Re-export so existing callers (`ingestion.view_data`,
+# `scripts.bootstrap_supabase`, etc.) keep working unmodified.
+__all__ = [
+    "PROCESSED_DIR",
+    "STATE_FILE",
+    "PIPELINE_VERSION_FILE",
+    "PARQUET_FILES",
+    "DEDUP_KEYS",
+    "save_df",
+    "load_df",
+    "load_fetch_state",
+    "save_fetch_state",
+    "write_pipeline_version",
+    "read_pipeline_version",
+    "clean_all",
+]
+
+
+# Per-process ParquetStorage cache. Keyed on the *current* PROCESSED_DIR
+# so a test that monkey-patches the module global rebuilds the
+# storage on the next call rather than keeping a stale instance.
+_cached_root: Path | None = None
+_cached_storage: ParquetStorage | None = None
+
+
+def _default_storage() -> ParquetStorage:
+    """Return the module's :class:`ParquetStorage` instance.
+
+    Rebuilds the instance whenever the module-level ``PROCESSED_DIR``
+    has been reassigned (e.g. by ``monkeypatch.setattr(storage,
+    "PROCESSED_DIR", tmp_path)`` in tests).
+    """
+    global _cached_root, _cached_storage
+    current = PROCESSED_DIR
+    if _cached_storage is None or _cached_root != current:
+        _cached_root = current
+        _cached_storage = ParquetStorage(root=current)
+    return _cached_storage
 
 
 # ── dataframe I/O ────────────────────────────────────────────────────────────
+
 def save_df(name: str, new_df: pd.DataFrame) -> None:
-    """Append *new_df* to the existing parquet file, dedup, sort, and write back."""
+    """Append *new_df* to the existing parquet file, dedup, sort, and write back.
+
+    Empty input is a no-op (and does NOT bump the pipeline-version
+    sidecar — same as the pre-shim behavior, asserted by
+    ``tests/test_storage.py::test_save_df_empty_does_not_write_sidecar``).
+    """
     if new_df.empty:
         return
-
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-
-    parquet_path = PROCESSED_DIR / PARQUET_FILES[name]
-
-    # Load existing data if present
-    if parquet_path.exists():
-        existing = pd.read_parquet(parquet_path)
-        combined = pd.concat([existing, new_df], ignore_index=True)
-    else:
-        combined = new_df.copy()
-
-    # Dedup after concat so overlapping re-fetched rows collapse
-    combined = combined.drop_duplicates(subset=DEDUP_KEYS[name], keep="first")
-
-    # Sort by the first dedup key (timestamp or equivalent)
-    sort_col = DEDUP_KEYS[name][0]
-    combined = combined.sort_values(sort_col).reset_index(drop=True)
-
-    combined.to_parquet(parquet_path, index=False)
-    logger.info("Saved %s: %d rows → %s", name, len(combined), parquet_path)
-
-    write_pipeline_version()
+    storage_inst = _default_storage()
+    storage_inst.upsert_table(name, new_df)
+    storage_inst.set_pipeline_version(PIPELINE_VERSION)
 
 
 def load_df(name: str) -> pd.DataFrame | None:
-    """Load a parquet file by logical name, or return None if it doesn't exist."""
-    parquet_path = PROCESSED_DIR / PARQUET_FILES[name]
-    if parquet_path.exists():
-        return pd.read_parquet(parquet_path)
+    """Load a parquet file by logical name, or return ``None`` if it doesn't exist.
+
+    Notably returns ``None`` (not an empty DataFrame) when the file is
+    absent — this is the pre-shim contract every caller relies on.
+    """
+    path = PROCESSED_DIR / PARQUET_FILES[name]
+    if path.exists():
+        return pd.read_parquet(path)
     return None
 
 
 # ── fetch state ──────────────────────────────────────────────────────────────
+
 def load_fetch_state() -> dict:
     """Load fetch state from JSON, or return an empty dict."""
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {}
+    return _default_storage()._read_legacy_fetch_state()
 
 
 def save_fetch_state(state: dict) -> None:
     """Persist fetch state to JSON."""
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
-    logger.info("Fetch state saved → %s", STATE_FILE)
+    _default_storage()._write_legacy_fetch_state(state)
 
 
 # ── pipeline version sidecar ─────────────────────────────────────────────────
+
 def write_pipeline_version(version: int | None = None) -> None:
     """Stamp the processed directory with the pipeline version that wrote it.
 
@@ -106,12 +127,7 @@ def write_pipeline_version(version: int | None = None) -> None:
     """
     if version is None:
         version = PIPELINE_VERSION
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": version,
-        "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    PIPELINE_VERSION_FILE.write_text(json.dumps(payload, indent=2))
+    _default_storage().set_pipeline_version(version)
 
 
 def read_pipeline_version() -> int | None:
@@ -121,31 +137,11 @@ def read_pipeline_version() -> int | None:
     treated as "unknown" rather than crashing — the version guard decides
     how to escalate from there.
     """
-    if not PIPELINE_VERSION_FILE.exists():
-        return None
-    try:
-        payload = json.loads(PIPELINE_VERSION_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-    version = payload.get("version")
-    if isinstance(version, int):
-        return version
-    return None
+    return _default_storage().get_pipeline_version()
 
 
 # ── housekeeping ─────────────────────────────────────────────────────────────
+
 def clean_all() -> None:
     """Delete all parquet files, the fetch-state file, and the version sidecar."""
-    for filename in PARQUET_FILES.values():
-        path = PROCESSED_DIR / filename
-        if path.exists():
-            path.unlink()
-            logger.info("Deleted %s", path)
-
-    if STATE_FILE.exists():
-        STATE_FILE.unlink()
-        logger.info("Deleted %s", STATE_FILE)
-
-    if PIPELINE_VERSION_FILE.exists():
-        PIPELINE_VERSION_FILE.unlink()
-        logger.info("Deleted %s", PIPELINE_VERSION_FILE)
+    _default_storage().clean_all()
