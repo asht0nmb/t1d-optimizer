@@ -188,6 +188,8 @@ class InMemoryStorage:
             event_ref=alert.event_ref,
             sent_at=alert.sent_at,
             payload=dict(alert.payload),
+            pump_serial=alert.pump_serial,
+            delivery=alert.delivery,
         )
         self._alerts.append(rec)
         return rec

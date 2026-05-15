@@ -74,12 +74,18 @@ class FetchState:
             actual date ranges, etc.). The existing
             ``ingestion.storage.load_fetch_state`` dict shape maps
             directly into this field for the ``"tandem"`` source.
+        source_kind: Connector kind (e.g. ``"tconnectsync"``,
+            ``"pydexcom"``). Mirrors the ``fetch_state.source_kind``
+            Postgres column (NOT NULL). Defaults to ``"unknown"`` for
+            callers that pre-date the field; the connectors populate the
+            real value when they sync.
     """
 
     source_id: str
     last_cursor: str | None
     last_fetched_at: datetime | None
     payload: dict[str, Any] = field(default_factory=dict)
+    source_kind: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,14 @@ class AlertRecord:
             :class:`ValueError` so the failure surfaces at the source.
         payload: JSON-shaped extras carried with the alert (e.g.
             current BG, trend, message text).
+        pump_serial: Pump that produced the alert, or ``None`` for
+            non-pump-scoped alert kinds (the Postgres column is
+            nullable, so ``None`` is a valid persistent value, not just
+            a sentinel for "not set yet").
+        delivery: Delivery status — typically ``"pending"`` (default,
+            mirrors the Postgres column default), ``"sent"``, or
+            ``"failed"``. The live alert loop advances this column as
+            it ships the alert downstream.
     """
 
     id: str | None
@@ -115,6 +129,8 @@ class AlertRecord:
     event_ref: str | None
     sent_at: datetime
     payload: dict[str, Any] = field(default_factory=dict)
+    pump_serial: str | None = None
+    delivery: str = "pending"
 
 
 @dataclass(frozen=True)

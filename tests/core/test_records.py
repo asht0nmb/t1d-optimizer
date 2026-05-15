@@ -75,6 +75,26 @@ class TestFetchState:
         b = FetchState("tandem", "abc", None, {"k": 1})
         assert a == b
 
+    def test_source_kind_defaults_to_unknown(self):
+        """`source_kind` defaults to ``'unknown'`` so callers that pre-date
+        the field keep working. Concrete sources (tconnectsync, pydexcom)
+        are populated by the connectors, not the storage layer."""
+        state = FetchState(
+            source_id="tandem",
+            last_cursor=None,
+            last_fetched_at=None,
+        )
+        assert state.source_kind == "unknown"
+
+    def test_source_kind_explicit_value(self):
+        state = FetchState(
+            source_id="tandem",
+            last_cursor=None,
+            last_fetched_at=None,
+            source_kind="tconnectsync",
+        )
+        assert state.source_kind == "tconnectsync"
+
 
 # ---------------------------------------------------------------------------
 # AlertRecord
@@ -112,6 +132,53 @@ class TestAlertRecord:
         rec = AlertRecord(None, "k", None, datetime(2026, 5, 13, tzinfo=timezone.utc), {})
         with pytest.raises(FrozenInstanceError):
             rec.alert_kind = "other"  # type: ignore[misc]
+
+    def test_pump_serial_defaults_to_none(self):
+        """`pump_serial` is nullable in the Postgres ``alerts_sent`` table
+        (not every alert kind is pump-scoped). Default ``None`` so existing
+        callers that pre-date the field keep working."""
+        rec = AlertRecord(
+            id=None,
+            alert_kind="anomaly_spike",
+            event_ref="cgm:1",
+            sent_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+            payload={},
+        )
+        assert rec.pump_serial is None
+
+    def test_pump_serial_explicit_value(self):
+        rec = AlertRecord(
+            id=None,
+            alert_kind="anomaly_spike",
+            event_ref="cgm:1",
+            sent_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+            payload={},
+            pump_serial="PUMP-A",
+        )
+        assert rec.pump_serial == "PUMP-A"
+
+    def test_delivery_defaults_to_pending(self):
+        """`delivery` mirrors the Postgres ``alerts_sent.delivery`` column
+        whose default is ``'pending'``."""
+        rec = AlertRecord(
+            id=None,
+            alert_kind="anomaly_spike",
+            event_ref="cgm:1",
+            sent_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+            payload={},
+        )
+        assert rec.delivery == "pending"
+
+    def test_delivery_explicit_value(self):
+        rec = AlertRecord(
+            id=None,
+            alert_kind="anomaly_spike",
+            event_ref="cgm:1",
+            sent_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+            payload={},
+            delivery="sent",
+        )
+        assert rec.delivery == "sent"
 
 
 # ---------------------------------------------------------------------------
