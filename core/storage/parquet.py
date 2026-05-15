@@ -41,6 +41,14 @@ from core.storage.records import (
 logger = logging.getLogger(__name__)
 
 
+def _isna(value: object) -> bool:
+    """``pd.isna`` wrapped so it never raises on non-scalar values."""
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
 # Logical-name → parquet filename. Kept identical to the names that
 # used to live in ``ingestion.storage.PARQUET_FILES`` so the on-disk
 # layout doesn't change. Re-exported from ``ingestion.storage`` for
@@ -81,7 +89,15 @@ PIPELINE_VERSION_FILENAME = ".pipeline_version.json"
 ALERTS_FILENAME = "alerts_sent.parquet"
 DETECTION_FILENAME = "detection_results.parquet"
 
-_ALERT_COLS = ("id", "alert_kind", "event_ref", "sent_at", "payload")
+_ALERT_COLS = (
+    "id",
+    "alert_kind",
+    "event_ref",
+    "sent_at",
+    "payload",
+    "pump_serial",
+    "delivery",
+)
 _DETECTION_COLS = ("kind", "anchor_timestamp", "payload", "created_at")
 
 
@@ -281,11 +297,19 @@ class ParquetStorage:
                 last_fetched_at = datetime.fromisoformat(last_fetched_at_str)
             else:
                 last_fetched_at = None
+            # `source_kind` was added after the initial per-source state
+            # JSON shape; older sidecars lack the key, so default to
+            # ``"unknown"`` (matches the FetchState dataclass default).
+            source_kind_raw = raw.get("source_kind", "unknown")
+            source_kind = (
+                source_kind_raw if isinstance(source_kind_raw, str) else "unknown"
+            )
             return FetchState(
                 source_id=source_id,
                 last_cursor=last_cursor if isinstance(last_cursor, str) or last_cursor is None else str(last_cursor),
                 last_fetched_at=last_fetched_at,
                 payload=dict(raw.get("payload", {})) if isinstance(raw.get("payload"), dict) else {},
+                source_kind=source_kind,
             )
         # Legacy flat dict shape: stored verbatim into payload, with the
         # other fields defaulted. Reached for the "tandem" source after
@@ -308,6 +332,7 @@ class ParquetStorage:
                 else None
             ),
             "payload": dict(state.payload),
+            "source_kind": state.source_kind,
         }
 
     def _load_state_map(self) -> tuple[dict[str, FetchState], list[str], dict[str, object] | None]:
@@ -431,6 +456,20 @@ class ParquetStorage:
             sent_at = r["sent_at"]
             if isinstance(sent_at, pd.Timestamp):
                 sent_at = sent_at.to_pydatetime()
+            # `pump_serial` and `delivery` were added after the initial
+            # alerts parquet shape; older files lack the columns, so
+            # `r.get(...)` defaults them. Treat a stored NaN identically
+            # to a missing column.
+            pump_serial_raw = r.get("pump_serial")
+            pump_serial = (
+                None if pump_serial_raw is None or _isna(pump_serial_raw)
+                else str(pump_serial_raw)
+            )
+            delivery_raw = r.get("delivery", "pending")
+            delivery = (
+                "pending" if delivery_raw is None or _isna(delivery_raw)
+                else str(delivery_raw)
+            )
             records.append(
                 AlertRecord(
                     id=r.get("id"),
@@ -438,6 +477,8 @@ class ParquetStorage:
                     event_ref=r.get("event_ref"),
                     sent_at=sent_at,
                     payload=dict(payload) if isinstance(payload, dict) else {},
+                    pump_serial=pump_serial,
+                    delivery=delivery,
                 )
             )
         return records
@@ -455,6 +496,8 @@ class ParquetStorage:
                 "event_ref": r.event_ref,
                 "sent_at": r.sent_at,
                 "payload": json.dumps(r.payload),
+                "pump_serial": r.pump_serial,
+                "delivery": r.delivery,
             }
             for r in records
         ]
@@ -476,6 +519,8 @@ class ParquetStorage:
             event_ref=alert.event_ref,
             sent_at=alert.sent_at,
             payload=dict(alert.payload),
+            pump_serial=alert.pump_serial,
+            delivery=alert.delivery,
         )
         records.append(rec)
         self._write_alerts(records)

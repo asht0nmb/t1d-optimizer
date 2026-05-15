@@ -5,14 +5,17 @@ at least one test here. The suite is parameterized over each concrete
 implementation; new implementations get their behavior validated
 "for free" by adding a fixture branch.
 
-Adding "supabase" is deferred to a follow-up PR (the SupabaseStorage
-implementation lands on top of `feat/supabase-bootstrap`).
+The ``"supabase"`` parameterization runs only when ``SUPABASE_TEST_URL``
+is set in the environment, and refuses to run against the production
+project (host-pattern denylist) as a defensive belt-and-suspenders.
 """
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 import pytest
@@ -31,10 +34,47 @@ UTC = timezone.utc
 # Fixtures
 # ---------------------------------------------------------------------------
 
-# Implementations parameterized into every contract test. "parquet"
-# is added in Step 5 of the TDD plan; "supabase" lands in a follow-up
-# PR using the same fixture body.
-_STORAGE_IMPLS: list[str] = ["memory", "parquet"]
+# Implementations parameterized into every contract test.
+_STORAGE_IMPLS: list[str] = ["memory", "parquet", "supabase"]
+
+# Hostname substrings that must never appear in SUPABASE_TEST_URL — if the
+# env var points at one of these we refuse to run, even though the tests
+# clean state between each run. Belt-and-suspenders behind the
+# "use a dedicated test project" convention.
+#
+# Operators MUST populate this tuple with their production project's
+# hostname patterns (both direct and pooler) before running the supabase
+# suite against any real database. The fixture below fails loud if the
+# tuple is empty when ``SUPABASE_TEST_URL`` is set, so an empty list
+# can't silently slip past CI.
+#
+# TODO: externalise via SUPABASE_PROD_HOST_DENYLIST env var once we have
+# more than one production project to guard against; the constant
+# suffices for the single-project case.
+_PROD_HOST_PATTERNS: tuple[str, ...] = (
+    # Examples of what to put here once the production project's
+    # hostnames are known:
+    #     "db.<prod-project-id>.supabase.co",
+    #     "aws-0-<prod-region>.pooler.supabase.com",
+    # The substring match is intentionally generous; any hostname
+    # containing one of these strings triggers the refusal.
+)
+
+
+def _refuse_if_prod(url: str) -> None:
+    """Raise :class:`RuntimeError` if ``url`` matches the production project.
+
+    Called by the ``supabase`` fixture branch and by Task 5's defensive
+    test that runs even without ``SUPABASE_TEST_URL`` set.
+    """
+    host = urlparse(url).hostname or ""
+    host = host.lower()
+    for pat in _PROD_HOST_PATTERNS:
+        if pat and pat.lower() in host:
+            raise RuntimeError(
+                f"SUPABASE_TEST_URL host {host!r} matches production "
+                f"pattern {pat!r}; refusing to run against prod."
+            )
 
 
 @pytest.fixture(params=_STORAGE_IMPLS)
@@ -46,10 +86,30 @@ def storage(request, tmp_path: Path):
     """
     match request.param:
         case "memory":
-            return InMemoryStorage()
+            yield InMemoryStorage()
         case "parquet":
             from core.storage.parquet import ParquetStorage
-            return ParquetStorage(root=tmp_path)
+            yield ParquetStorage(root=tmp_path)
+        case "supabase":
+            url = os.environ.get("SUPABASE_TEST_URL")
+            if not url:
+                pytest.skip("SUPABASE_TEST_URL not set")
+            if not _PROD_HOST_PATTERNS:
+                pytest.fail(
+                    "_PROD_HOST_PATTERNS in tests/core/test_storage_contract.py "
+                    "is empty; populate it with the production project's "
+                    "hostname patterns before running the supabase suite. "
+                    "Refusing to run with the safety net disabled."
+                )
+            _refuse_if_prod(url)
+            from core.storage.supabase import SupabaseStorage
+            s = SupabaseStorage.from_pooler_url(url)
+            s.clean_all()
+            try:
+                yield s
+            finally:
+                s.clean_all()
+                s.close()
         case other:
             raise AssertionError(f"unhandled storage fixture param: {other!r}")
 

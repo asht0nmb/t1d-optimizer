@@ -2,19 +2,20 @@
 
 Every caller in `core/` and the downstream shells takes a
 :class:`Storage` and the deployment shell decides which concrete
-implementation to instantiate at startup. Three implementations exist
-(or are planned):
+implementation to instantiate at startup. Three implementations exist:
 
 * :class:`core.storage.parquet.ParquetStorage` — local files; today's
   default and the OSS shell day-one impl.
 * :class:`core.storage.memory.InMemoryStorage` — in-process dicts and
   DataFrames; used by tests.
-* ``core.storage.supabase.SupabaseStorage`` — Postgres via psycopg2;
-  *implementation pending* in a follow-up PR (Phase 3 of the plan).
+* :class:`core.storage.supabase.SupabaseStorage` — Postgres via
+  psycopg2; used by the personal stack (Vercel + GitHub Actions +
+  dashboard).
 
 Concrete implementations are checked against
 :mod:`tests.core.test_storage_contract` — every behavior described in
-the docstrings below has at least one parameterized test.
+the docstrings below has at least one parameterized test, exercised
+against every backend.
 
 Design notes
 ------------
@@ -59,7 +60,7 @@ class Storage(Protocol):
     """Backend-agnostic data layer.
 
     Implementations: :class:`ParquetStorage` (local files),
-    ``SupabaseStorage`` (Postgres, pending), :class:`InMemoryStorage`
+    :class:`SupabaseStorage` (Postgres), :class:`InMemoryStorage`
     (tests). Callers never reference a concrete impl; they accept a
     :class:`Storage` and the shell decides.
     """
