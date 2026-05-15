@@ -57,6 +57,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import pandas as pd
+from dotenv import load_dotenv
 
 try:  # psycopg2 is not needed for --dry-run, so the import is best-effort.
     import psycopg2  # type: ignore[import-not-found]
@@ -67,6 +68,12 @@ except ImportError:  # pragma: no cover - exercised before psycopg2 is installed
 
 from core.storage._postgres_converters import COLUMN_SPECS, CONVERTERS
 from ingestion.storage import PARQUET_FILES, PROCESSED_DIR
+
+# Mirror ``main.py``: pick up SUPABASE_DB_URL (and friends) from the
+# repo-root ``.env`` automatically so callers don't have to ``source .env``
+# before every invocation. dotenv silently no-ops if .env is missing or
+# the variable is already set in the environment.
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
