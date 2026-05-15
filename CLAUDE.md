@@ -28,11 +28,11 @@ uv run jupyter notebook research.ipynb
 
 The ingestion + enrichment + detection layers are in place; surfaces (Telegram / Streamlit / live pydexcom) are not yet built. Current layout:
 
-- `core/` — storage-agnostic library shared by every deployment shell. Houses the `Storage` Protocol (`core/storage/protocol.py`), the schema registry (`core/schema.py`), typed metadata records (`core/storage/records.py`), and the parquet + in-memory implementations (`core/storage/parquet.py`, `core/storage/memory.py`).
+- `core/` — storage-agnostic library shared by every deployment shell. Houses the `Storage` Protocol (`core/storage/protocol.py`), the schema registry (`core/schema.py`), typed metadata records (`core/storage/records.py`), and three implementations (`core/storage/parquet.py`, `core/storage/memory.py`, `core/storage/supabase.py`). The pandas → Postgres converters that `SupabaseStorage` and the bootstrap script share live in `core/storage/_postgres_converters.py`.
 - `ingestion/` — tconnectsync client, per-event-type builders, enrichment (`bolus_category`, `forced_by_alarm`, `site_issues`, `cgm_gaps`), parquet storage shim (`ingestion/storage.py` delegates to `ParquetStorage`), shared view-mode helper (`view_data.py`).
 - `detection/` — typed `AppConfig` + `daily_features` patterns-layer foundation. Source-agnostic: pure DataFrame-in / DataFrame-out, no ingestion imports. v1 reference implementation (anomaly / meal / clustering) is quarantined under `detection/legacy/` — see its README.
 - `scripts/` — CLI entry points: `sanity_check` (check), `daily_viz` (viz), `doctor`.
-- `tests/` — 463 passing tests in the default suite across builders, storage, enrichment, detection features/config, CLI, and the storage Protocol contract suite under `tests/core/`. 47 additional `legacy`-marked tests cover `detection/legacy/*` and run opt-in via `uv run pytest -m legacy`.
+- `tests/` — 477 passing tests in the default suite across builders, storage, enrichment, detection features/config, CLI, and the storage Protocol contract suite under `tests/core/` (an additional 34 supabase-parameterized tests skip unless `SUPABASE_TEST_URL` is set). 47 additional `legacy`-marked tests cover `detection/legacy/*` and run opt-in via `uv run pytest -m legacy`.
 
 ### `core/` package boundary
 
@@ -40,13 +40,15 @@ The `core/` package is the storage-agnostic library that both the personal deplo
 
 - `core/` MAY import from: stdlib, pandas, numpy, pydantic, typing/Protocol.
 - `core/` MAY NOT import from: `ingestion/`, `scripts/`, `apps/`, `psycopg2`, `supabase-py`, parquet-specific code outside `core/storage/parquet.py`, Vercel SDK, Streamlit, FastAPI, Telegram libs, LLM clients.
-- Backend-specific concrete code (psycopg2 calls, parquet I/O) lives in `core/storage/parquet.py` and the forthcoming `core/storage/supabase.py`. Those are the ONLY files allowed to import their respective backend SDKs.
+- Backend-specific concrete code (psycopg2 calls, parquet I/O) lives in `core/storage/parquet.py`, `core/storage/supabase.py`, and `core/storage/_postgres_converters.py`. Those are the ONLY files allowed to import their respective backend SDKs.
 - Code in `core/` never decides which backend to use; the shell instantiates a `Storage` implementation at startup and passes it down via constructor injection.
 - New downstream code (detection v2, the live alert loop, the Tandem→Supabase sync, the dashboard backend) takes a `Storage` via DI from the start.
 
-### Storage abstraction (in progress)
+### Storage abstraction
 
-The `Storage` Protocol in `core/storage/protocol.py` is the backend-agnostic data layer every caller talks to. Phase 1 (this PR family) landed the Protocol, the schema registry, and two implementations (`ParquetStorage`, `InMemoryStorage`) — both validated by parameterized contract tests under `tests/core/test_storage_contract.py`. `SupabaseStorage` is pending in a follow-up PR built on top of `feat/supabase-bootstrap`; it will be added to the same fixture as a `"supabase"` parameter so it gets the contract suite for free. The existing `ingestion/storage.py` is now a thin shim over `ParquetStorage` so every pre-Protocol caller (fetch, view, detection, `bootstrap_supabase`) keeps working unchanged — Phase 3 (migrating existing callers to take a `Storage` via DI) is deferred to a later PR.
+The `Storage` Protocol in `core/storage/protocol.py` is the backend-agnostic data layer every caller talks to. Phase 1 (this PR family) landed the Protocol, the schema registry, and three implementations: `ParquetStorage` (local files), `InMemoryStorage` (tests), and `SupabaseStorage` (Postgres via psycopg2) — all three validated by parameterized contract tests under `tests/core/test_storage_contract.py`. The supabase parameterization skips unless `SUPABASE_TEST_URL` is set, and refuses to run against any host that matches a production-host denylist. The existing `ingestion/storage.py` is still a thin shim over `ParquetStorage` so every pre-Protocol caller (fetch, view, detection, `bootstrap_supabase`) keeps working unchanged — migrating existing callers to take a `Storage` via DI is deferred to follow-up PRs (live alert loop, Tandem nightly sync, dashboard backend, Telegram handlers).
+
+SupabaseStorage callers MUST use the transaction-mode pooler URL (`*.pooler.supabase.com:6543`) and an open-do-close lifecycle (context manager for short-lived via `SupabaseStorage.from_pooler_url(url)`, caller-managed conn via `SupabaseStorage(conn=...)` for long-lived). Direct connections (`db.*.supabase.co:5432`) are reserved for the nightly GitHub Action and the one-shot `scripts/bootstrap_supabase.py`. The Postgres-side `idle_in_transaction_session_timeout = '5min'` set by migration 0002 is the belt-and-suspenders backstop.
 
 When you finish a substantive change, write a dated `docs/updates/YYYY-MM-DD-*.md` entry rather than mutating prior updates. The dated trail is the audit log.
 
@@ -89,7 +91,7 @@ The first 6 lines are a metadata header (device info, software version, report d
 - `ingestion/` — tconnectsync client, builders, enrichment, storage shim, view-mode helper
 - `detection/` — typed config + `daily_features` patterns-layer foundation. `detection/legacy/` holds the v1 reference implementation (not maintained, not imported from production code).
 - `scripts/` — CLI entry points (`sanity_check`, `daily_viz`, `doctor`)
-- `tests/` — pytest suite (463 default, plus 47 legacy-marked tests opt-in via `-m legacy`); Storage Protocol contract suite under `tests/core/`
+- `tests/` — pytest suite (477 default, plus 47 legacy-marked tests opt-in via `-m legacy`); Storage Protocol contract suite under `tests/core/`
 - `docs/operating_docs/` — `TECHNICAL_SPEC.md`, `DATA_CATALOG.md`, `DATA_NOTES.md`, `DATA_NOTES_2.md`, `DATA_ISSUES.md`, `api_levels.md`, `tconnectsync_api_map.md`
 - `docs/updates/` — dated session write-ups (`YYYY-MM-DD-*.md`); append-only audit log
 - `research.ipynb` — exploratory analysis notebook

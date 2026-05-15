@@ -155,6 +155,84 @@ class TestSidecarsOnDisk:
 
 
 # ---------------------------------------------------------------------------
+# Round-tripping the additive AlertRecord / FetchState fields
+# ---------------------------------------------------------------------------
+
+
+class TestRecordExtensionsRoundTrip:
+    def test_alert_record_preserves_pump_serial_and_delivery(self, tmp_path: Path):
+        """The new AlertRecord fields (`pump_serial`, `delivery`) must
+        survive parquet write→read so they aren't silently lost when the
+        live alert loop later reads them back."""
+        storage = ParquetStorage(root=tmp_path)
+        ts = datetime(2026, 5, 13, 12, 0, tzinfo=UTC)
+        rec = AlertRecord(
+            id=None,
+            alert_kind="anomaly_spike",
+            event_ref="cgm:1",
+            sent_at=ts,
+            payload={"bg": 240},
+            pump_serial="PUMP-A",
+            delivery="sent",
+        )
+        storage.record_alert(rec)
+
+        # find_alert returns the persisted record, not the input.
+        got = storage.find_alert("anomaly_spike", "cgm:1")
+        assert got is not None
+        assert got.pump_serial == "PUMP-A"
+        assert got.delivery == "sent"
+
+    def test_alert_record_defaults_when_loaded_from_legacy_parquet(
+        self, tmp_path: Path
+    ):
+        """An older parquet (written before the new columns existed) must
+        still load: defaults fill in `pump_serial=None`, `delivery='pending'`.
+
+        Simulated by writing a hand-rolled parquet without the new columns,
+        then reading it back via ParquetStorage.find_alert.
+        """
+        legacy = pd.DataFrame([
+            {
+                "id": "legacy-1",
+                "alert_kind": "anomaly_spike",
+                "event_ref": "cgm:legacy",
+                "sent_at": datetime(2026, 5, 13, 12, 0, tzinfo=UTC),
+                "payload": json.dumps({"bg": 200}),
+            }
+        ])
+        # Write the legacy-shaped parquet directly to the alerts file.
+        from core.storage.parquet import ALERTS_FILENAME
+        legacy.to_parquet(tmp_path / ALERTS_FILENAME, index=False)
+
+        storage = ParquetStorage(root=tmp_path)
+        got = storage.find_alert("anomaly_spike", "cgm:legacy")
+        assert got is not None
+        assert got.pump_serial is None
+        assert got.delivery == "pending"
+        assert got.payload == {"bg": 200}
+
+    def test_fetch_state_preserves_source_kind(self, tmp_path: Path):
+        """The new FetchState.source_kind field round-trips through the
+        per-source state JSON."""
+        storage = ParquetStorage(root=tmp_path)
+        ts = datetime(2026, 5, 13, tzinfo=UTC)
+        state = FetchState(
+            source_id="tandem",
+            last_cursor="abc",
+            last_fetched_at=ts,
+            payload={"k": 1},
+            source_kind="tconnectsync",
+        )
+        storage.set_fetch_state("tandem", state)
+
+        got = storage.get_fetch_state("tandem")
+        assert got is not None
+        assert got.source_kind == "tconnectsync"
+        assert got == state
+
+
+# ---------------------------------------------------------------------------
 # delete_range: empty-after-delete should preserve the file
 # ---------------------------------------------------------------------------
 
