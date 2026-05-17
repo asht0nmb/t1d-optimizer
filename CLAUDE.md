@@ -50,6 +50,14 @@ The `Storage` Protocol in `core/storage/protocol.py` is the backend-agnostic dat
 
 SupabaseStorage callers MUST use the transaction-mode pooler URL (`*.pooler.supabase.com:6543`) and an open-do-close lifecycle (context manager for short-lived via `SupabaseStorage.from_pooler_url(url)`, caller-managed conn via `SupabaseStorage(conn=...)` for long-lived). Direct connections (`db.*.supabase.co:5432`) are reserved for the nightly GitHub Action and the one-shot `scripts/bootstrap_supabase.py`. The Postgres-side `idle_in_transaction_session_timeout = '5min'` set by migration 0002 is the belt-and-suspenders backstop.
 
+#### RLS model
+
+Migration `0003_enable_rls.sql` enables Row-Level Security on every public table under a four-role threat model. `postgres` (psycopg2 with the DB password — used by `bootstrap_supabase.py`, the GitHub Action nightly sync, and `SupabaseStorage`) and `service_role` (Supabase JWT for server-side admin calls — used by future Vercel API routes) both have the `BYPASSRLS` attribute and are unaffected by RLS. `authenticated` (Supabase JWT for signed-in users) and `anon` (Supabase JWT for unauthenticated requests, the key embedded in client bundles) are subject to RLS.
+
+Each of the 13 public tables carries one permissive policy: `auth_required_all FOR ALL TO authenticated USING (true) WITH CHECK (true)`. `anon` has no policy on any table, so the default-deny behaviour applies — anon-key requests see zero rows everywhere. This is the minimum-viable lockdown for the current single-user shape; per-row ownership (`USING (user_id = auth.uid())`) is deferred until a multi-user story exists.
+
+Implication for new code: server-side handlers that need admin access should connect via `service_role` (or the postgres role through `SupabaseStorage`) and rely on application-level authorization. Client-side handlers (Next.js bundles, future Streamlit pages with `@supabase/supabase-js`) MUST go through the anon key + Supabase Auth and rely on RLS for tenant isolation — they cannot read or write any public table without a signed-in `authenticated` session.
+
 When you finish a substantive change, write a dated `docs/updates/YYYY-MM-DD-*.md` entry rather than mutating prior updates. The dated trail is the audit log.
 
 ### Data Pipeline
