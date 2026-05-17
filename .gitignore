@@ -5,6 +5,10 @@
 .env*
 !.env.example
 
+# tconnectsync credential cache (written to cwd on auth)
+.creds_cache
+.config/tconnectsync/
+
 # Research with PHI
 research/
 
