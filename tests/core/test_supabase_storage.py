@@ -22,6 +22,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
+import pandas as pd
+import psycopg2
 import pytest
 
 from core.storage.records import AlertRecord, FetchState
@@ -299,3 +301,120 @@ class TestProdHostDenylist:
             "postgres://user:pw@db.testproject.supabase.co:5432/postgres"
         )
         assert parsed.hostname == "db.testproject.supabase.co"
+
+
+# ---------------------------------------------------------------------------
+# Row-Level Security (migration 0003_enable_rls)
+# ---------------------------------------------------------------------------
+
+
+def test_rls_denies_anon(supabase_storage):
+    """The ``anon`` Postgres role sees zero rows and can't write either.
+
+    Migration ``0003_enable_rls.sql`` enables RLS on all 13 public
+    tables and grants a single permissive ``FOR ALL TO authenticated``
+    policy each. The ``anon`` role has no policy, so default-deny
+    applies (no permissive policy means zero visible rows on SELECT and
+    an insufficient-privilege error on INSERT / UPDATE / DELETE).
+
+    The test reuses the postgres-role pooler connection that the
+    ``supabase_storage`` fixture already opens and switches to the
+    ``anon`` role via ``SET LOCAL ROLE`` — the same role-switching
+    mechanism PostgREST/Supabase use internally when they accept an
+    anon-key JWT. (Future per-row policies like
+    ``USING (user_id = auth.uid())`` would additionally require setting
+    ``request.jwt.claims`` GUCs; the current policies do not reference
+    JWT claims so the bare role switch suffices.)
+
+    Two representative tables are checked — one data table (``cgm``)
+    and one metadata table (``alerts_sent``) — rather than enumerating
+    all 13. The test exists to prove the policy *applies* (and applies
+    to both reads and writes); the SQL migration is what guarantees
+    coverage, and the ``get_advisors`` MCP check at apply time confirms
+    there are no ``rls_disabled`` warnings left.
+
+    Skips automatically when ``SUPABASE_TEST_URL`` is unset (via the
+    fixture). The role switch is wrapped in ``try`` / ``finally`` so a
+    failed assertion never leaves the shared connection stuck as
+    ``anon`` for subsequent tests.
+    """
+    ts = datetime(2026, 5, 13, 12, 0, tzinfo=UTC)
+
+    cgm_df = pd.DataFrame(
+        [
+            {
+                "pump_serial": "PUMP-A",
+                "seqnum": 1,
+                "timestamp": ts,
+                "bg_mgdl": 120,
+                "backfilled": False,
+                "sensor_timestamp": None,
+            }
+        ]
+    )
+    supabase_storage.upsert_table("cgm", cgm_df)
+    supabase_storage.record_alert(
+        _alert(kind="rls_smoke", event_ref="rls_smoke:1", sent_at=ts)
+    )
+
+    # Sanity: postgres role sees the seeded data — proves the assertions
+    # below are testing RLS, not an empty database.
+    pg_cgm = supabase_storage.read_table(
+        "cgm",
+        since=ts - timedelta(hours=1),
+        until=ts + timedelta(hours=1),
+    )
+    assert len(pg_cgm) == 1, (
+        "Seeded cgm row not visible to postgres role; test setup is broken, "
+        "not RLS."
+    )
+    pg_alerts = supabase_storage.recent_alerts(
+        "rls_smoke", within=timedelta(days=1)
+    )
+    assert len(pg_alerts) == 1, "Seeded alerts_sent row not visible to postgres role."
+
+    conn = supabase_storage._conn
+    anon_insert_error: Exception | None = None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL ROLE anon")
+            cur.execute("SELECT count(*) FROM cgm")
+            anon_cgm = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM alerts_sent")
+            anon_alerts = cur.fetchone()[0]
+        conn.rollback()
+
+        # Anon must also be denied writes. Run in a fresh transaction so
+        # the failed INSERT doesn't poison the outer one.
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL ROLE anon")
+            try:
+                cur.execute(
+                    "INSERT INTO cgm "
+                    "(pump_serial, seqnum, timestamp, bg_mgdl, backfilled) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    ("PUMP-X", 99, ts, 100, False),
+                )
+            except psycopg2.Error as exc:
+                anon_insert_error = exc
+        conn.rollback()
+    finally:
+        # SET LOCAL is scoped to the current transaction, so the rollbacks
+        # above already drop the role. The explicit RESET ROLE is belt-
+        # and-suspenders in case an earlier statement implicitly committed.
+        with conn.cursor() as cur:
+            cur.execute("RESET ROLE")
+        conn.rollback()
+
+    assert anon_cgm == 0, (
+        f"RLS not enforced: anon role sees {anon_cgm} cgm rows (expected 0). "
+        "Apply db/migrations/0003_enable_rls.sql to this project."
+    )
+    assert anon_alerts == 0, (
+        f"RLS not enforced: anon role sees {anon_alerts} alerts_sent rows "
+        "(expected 0). Apply db/migrations/0003_enable_rls.sql to this project."
+    )
+    assert anon_insert_error is not None, (
+        "RLS not enforced for writes: anon role INSERT into cgm succeeded. "
+        "Expected an InsufficientPrivilege / RLS violation."
+    )

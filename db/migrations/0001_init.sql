@@ -12,8 +12,9 @@
 -- and indexes use IF NOT EXISTS. COMMENT statements are unconditional because
 -- they always overwrite.
 --
--- Schema = public. RLS, roles, and policies are intentionally NOT created
--- here; they are deferred per the bootstrap spec.
+-- Schema = public. RLS lives in 0003_enable_rls.sql (see that file for the
+-- policy model); the bootstrap spec defers RLS to its own migration so it
+-- can be applied or rolled back independently of the schema definition.
 --
 -- Tables created (12 total):
 --   1. cgm             -- 5-minute CGM readings, includes backfilled samples.
