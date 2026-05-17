@@ -47,4 +47,7 @@ jobs:
           CACHE_CREDENTIALS: "false"
           # Disable buffered / colored output to keep CI logs clean.
           PYTHONUNBUFFERED: "1"
-        run: uv run python scripts/ci_tandem_smoke.py
+        # Invoked via `-m` so cwd (the repo root, where actions/checkout
+        # lands) is on sys.path. Direct `python scripts/ci_tandem_smoke.py`
+        # would only put scripts/ on sys.path, breaking `from ingestion ...`.
+        run: uv run python -m scripts.ci_tandem_smoke
