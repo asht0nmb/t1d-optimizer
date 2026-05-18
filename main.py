@@ -54,6 +54,11 @@ def main():
         help="Diagnose pipeline health (version, parquet presence, stacking)",
     )
 
+    sub.add_parser(
+        "dashboard",
+        help="Launch the local Streamlit dashboard (apps/local)",
+    )
+
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -87,6 +92,25 @@ def main():
     elif args.command == "doctor":
         from scripts.doctor import doctor
         doctor()
+
+    elif args.command == "dashboard":
+        import subprocess
+        from pathlib import Path
+
+        try:
+            import streamlit  # noqa: F401
+        except ImportError:
+            print(
+                "Streamlit is not installed. Run: uv sync --group local",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        app = Path(__file__).resolve().parent / "apps" / "local" / "app.py"
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", str(app)],
+            check=True,
+        )
 
     else:
         parser.print_help()

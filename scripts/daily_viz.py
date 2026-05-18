@@ -320,19 +320,27 @@ def _prepare_frames(
     return raw
 
 
-def daily_viz(date_str: str, view: ViewMode = "original") -> None:
+def build_daily_figure(
+    date_str: str,
+    view: ViewMode = "original",
+    *,
+    frames: dict[str, pd.DataFrame] | None = None,
+    config: dict | None = None,
+) -> plt.Figure | None:
+    """Build the multi-panel day figure. Returns ``None`` when there is no CGM data."""
     if view not in VIEW_MODES:
         raise ValueError(
             f"Unknown view mode {view!r}; expected one of {VIEW_MODES}"
         )
 
     target = date.fromisoformat(date_str)
-    warn_if_stale(stream="stdout")
-    config = _load_config()
+    if config is None:
+        config = _load_config()
     low = config["bg_targets"]["low"]
     high = config["bg_targets"]["high"]
 
-    frames = _prepare_frames(target, view)
+    if frames is None:
+        frames = _prepare_frames(target, view)
 
     cgm = _filter_day(frames["cgm"], target)
     bolus = _filter_day(frames["bolus"], target)
@@ -351,8 +359,7 @@ def daily_viz(date_str: str, view: ViewMode = "original") -> None:
     )
 
     if cgm.empty:
-        print(f"No CGM data for {target}. Run: uv run python main.py fetch-day --date {date_str}")
-        return
+        return None
 
     # Compute stats
     bg = cgm["bg_mgdl"]
@@ -700,6 +707,18 @@ def daily_viz(date_str: str, view: ViewMode = "original") -> None:
     ax_cgm.grid(axis="y", alpha=0.2, linewidth=0.5)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
+    return fig
+
+
+def daily_viz(date_str: str, view: ViewMode = "original") -> None:
+    warn_if_stale(stream="stdout")
+    fig = build_daily_figure(date_str, view=view)
+    if fig is None:
+        print(
+            f"No CGM data for {date_str}. "
+            f"Run: uv run python main.py fetch-day --date {date_str}"
+        )
+        return
     plt.show()
 
 

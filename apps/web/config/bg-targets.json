@@ -1,0 +1,6 @@
+{
+  "low": 70,
+  "high": 180,
+  "target": 110,
+  "source": "Copied from config/user_config.yaml at scaffold time; server loads apps/web/config/bg-targets.json or USER_CONFIG_PATH env override."
+}

@@ -34,3 +34,6 @@ markers = [
 dev = [
     "pytest>=9.0.2",
 ]
+local = [
+    "streamlit>=1.44.0",
+]
