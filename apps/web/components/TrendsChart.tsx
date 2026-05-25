@@ -27,7 +27,11 @@ export function TrendsChart({ data }: { data: TrendsResponse }) {
         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
         <XAxis dataKey="date" tick={{ fontSize: 11 }} />
         <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} unit="%" />
-        <Tooltip formatter={(v: number) => `${v.toFixed(1)}%`} />
+        <Tooltip
+          formatter={(v) =>
+            typeof v === "number" ? `${v.toFixed(1)}%` : String(v ?? "")
+          }
+        />
         <Legend />
         <Area
           type="monotone"
