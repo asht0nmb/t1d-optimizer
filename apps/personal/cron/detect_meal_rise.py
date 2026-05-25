@@ -58,7 +58,9 @@ def normalize_dexcom_readings(
     if df.empty:
         return df
     out = df.copy()
-    out["_bucket"] = out["timestamp"].dt.floor(f"{interval_minutes}min")
+    # Convert to UTC to compute floor buckets, avoiding DST AmbiguousTimeError/NonExistentTimeError
+    utc_timestamps = out["timestamp"].dt.tz_convert("UTC")
+    out["_bucket"] = utc_timestamps.dt.floor(f"{interval_minutes}min")
     out = (
         out.sort_values("timestamp")
         .groupby("_bucket", as_index=False)
@@ -75,18 +77,18 @@ def get_storage_connection() -> Any:
     db_url = os.environ.get("SUPABASE_DB_URL")
     if db_url:
         try:
-            import psycopg2
             from core.storage.supabase import SupabaseStorage
-            logger.info("Initializing SupabaseStorage connection...")
-            conn = psycopg2.connect(db_url, connect_timeout=10)
-            return SupabaseStorage(conn=conn), conn
+            logger.info("Initializing SupabaseStorage connection via pooler...")
+            storage = SupabaseStorage.from_pooler_url(db_url)
+            return storage, storage
         except ImportError:
             logger.error("psycopg2 is not installed; cannot connect to Supabase.")
             raise
     else:
         from core.storage.parquet import ParquetStorage
+        from ingestion.storage import PROCESSED_DIR
         logger.info("Initializing ParquetStorage connection...")
-        return ParquetStorage(), None
+        return ParquetStorage(PROCESSED_DIR), None
 
 
 def fetch_dexcom_cgm(meal_rise_config: MealRiseConfig, tz_name: str) -> pd.DataFrame:
@@ -152,6 +154,7 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
     payload = {
         "chat_id": chat_id,
         "text": text,
+        "parse_mode": "HTML",
     }
     logger.info("Sending alert to Telegram chat ID: %s...", chat_id[:5] + "...")
     try:
