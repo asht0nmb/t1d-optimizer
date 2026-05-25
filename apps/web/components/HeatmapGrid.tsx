@@ -20,7 +20,7 @@ export function HeatmapGrid({
   high: number;
 }) {
   const hours = Array.from({ length: 24 }, (_, i) => i);
-  const dates = [...new Set(data.cells.map((c) => c.date))].sort();
+  const dates = Array.from(new Set(data.cells.map((c) => c.date))).sort();
   const byKey = new Map(
     data.cells.map((c) => [`${c.date}-${c.hour}`, c.median_bg ?? c.avg_bg]),
   );
