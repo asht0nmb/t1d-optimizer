@@ -41,3 +41,6 @@ data/models/
 # Runtime logs
 .fetch.log
 *.log
+
+# Other logs
+tconnectsync-check-output.log
