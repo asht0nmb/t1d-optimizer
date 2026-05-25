@@ -12,6 +12,7 @@ from apps.personal.cron.detect_meal_rise import (
     handle_detection_alert,
     normalize_dexcom_readings,
     run_cron,
+    get_storage_connection,
 )
 from detection.config import get_config
 
@@ -273,3 +274,51 @@ def test_normalize_dexcom_readings_one_per_bucket():
     out = normalize_dexcom_readings(df, interval_minutes=5)
     assert len(out) == 1
     assert out.iloc[0]["bg_mgdl"] == 120
+
+
+def test_get_storage_connection_parquet(monkeypatch):
+    """Test get_storage_connection falls back to ParquetStorage with correct root."""
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    from core.storage.parquet import ParquetStorage
+    
+    storage, conn = get_storage_connection()
+    assert isinstance(storage, ParquetStorage)
+    assert conn is None
+    # Verify the root is set to the canonical PROCESSED_DIR
+    from ingestion.storage import PROCESSED_DIR
+    assert storage.root == PROCESSED_DIR
+
+
+def test_get_storage_connection_supabase(monkeypatch):
+    """Test get_storage_connection uses SupabaseStorage.from_pooler_url when db_url is set."""
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://user:pass@localhost:5432/db")
+    
+    mock_from_pooler = MagicMock()
+    monkeypatch.setattr("core.storage.supabase.SupabaseStorage.from_pooler_url", mock_from_pooler)
+    
+    get_storage_connection()
+    mock_from_pooler.assert_called_once_with("postgresql://user:pass@localhost:5432/db")
+
+
+def test_normalize_dexcom_readings_dst_transition():
+    """Verify that normalize_dexcom_readings does not raise AmbiguousTimeError/NonExistentTimeError on DST fallback/spring forward."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Los_Angeles")
+    
+    # Fallback transition (repeated hour): 2026-11-01 01:30:00 PDT and PST
+    # We create timestamps that cross or land exactly in the ambiguous local hour.
+    # In America/Los_Angeles, clocks fall back on Nov 1, 2026 at 2:00 AM.
+    # 2026-11-01 01:30:00 PDT corresponds to 08:30:00 UTC
+    # 2026-11-01 01:30:00 PST corresponds to 09:30:00 UTC
+    ts1 = datetime(2026, 11, 1, 8, 30, tzinfo=timezone.utc).astimezone(tz)
+    ts2 = datetime(2026, 11, 1, 9, 30, tzinfo=timezone.utc).astimezone(tz)
+    
+    df = pd.DataFrame({
+        "timestamp": [ts1, ts1 + timedelta(minutes=2), ts2, ts2 + timedelta(minutes=2)],
+        "bg_mgdl": [100, 110, 120, 130]
+    })
+    
+    # This should not raise AmbiguousTimeError or NonExistentTimeError!
+    out = normalize_dexcom_readings(df, interval_minutes=5)
+    assert not out.empty
+
