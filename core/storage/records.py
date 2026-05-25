@@ -134,6 +134,20 @@ class AlertRecord:
 
 
 @dataclass(frozen=True)
+class AlertInsertResult:
+    """Outcome of :meth:`Storage.record_alert`.
+
+    Attributes:
+        record: The stored (or pre-existing) alert row.
+        inserted: ``True`` when a new row was written; ``False`` when
+            deduplication returned an existing ``(alert_kind, event_ref)``.
+    """
+
+    record: AlertRecord
+    inserted: bool
+
+
+@dataclass(frozen=True)
 class DetectionResult:
     """A single triggered detection — the minimal record shape.
 

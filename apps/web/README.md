@@ -40,8 +40,25 @@ Magic link is used (not GitHub OAuth) to keep single-user setup minimal.
 | `TZ` | server | Calendar-day windows (default `America/Los_Angeles`) |
 | `DEFAULT_PUMP_SERIAL` | server | Optional single-pump filter |
 | `USER_CONFIG_PATH` | server | Optional JSON/YAML path for `bg_targets` |
+| `CRON_SECRET` | cron only | Bearer token for `/api/meal_rise_cron` (Vercel Cron injects `Authorization`) |
+| `DEXCOM_USERNAME` / `DEXCOM_PASSWORD` | cron only | Dexcom Share credentials for live CGM poll |
+| `DEXCOM_OUS` | cron only | `true` for non-US Dexcom accounts |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | cron only | Missed-meal alert delivery |
 
 BG targets default to `config/bg-targets.json` (synced from repo `config/user_config.yaml`). The UI never hardcodes TIR thresholds.
+
+### Meal-rise cron (M1)
+
+Vercel Cron runs every five minutes (`vercel.json` → `/api/meal_rise_cron`). The Python serverless handler calls `apps/personal/cron/detect_meal_rise.run_cron()` with monorepo `includeFiles` for `core/`, `detection/`, and `config/`.
+
+Manual check (after deploy):
+
+```bash
+curl -s -H "Authorization: Bearer $CRON_SECRET" https://YOUR_APP.vercel.app/api/cron/meal-rise
+curl -s -H "Authorization: Bearer $CRON_SECRET" https://YOUR_APP.vercel.app/api/meal_rise_cron
+```
+
+Confirm one invocation in Vercel → Project → Cron Jobs / Functions logs.
 
 ## Pages (Phase A)
 
@@ -71,7 +88,7 @@ Server-only queries live under `lib/queries/`:
 npm run dev      # local server
 npm run build    # production build (required gate)
 npm run lint
-npm run test     # vitest — TIR, dates, API helpers
+npm run test     # vitest — TIR, dates, API helpers, cron auth
 ```
 
 ## Vercel deploy

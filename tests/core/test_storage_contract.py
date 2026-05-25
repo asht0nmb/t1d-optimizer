@@ -22,6 +22,7 @@ import pytest
 
 from core.storage.memory import InMemoryStorage
 from core.storage.records import (
+    AlertInsertResult,
     AlertRecord,
     DetectionResult,
     FetchState,
@@ -393,17 +394,28 @@ class TestAlertsProtocol:
         )
 
     def test_record_new_event_ref_inserts(self, storage):
-        rec = storage.record_alert(self._alert(event_ref="cgm:1"))
-        assert rec.id is not None
-        assert rec.alert_kind == "anomaly_spike"
-        assert rec.event_ref == "cgm:1"
+        result = storage.record_alert(self._alert(event_ref="cgm:1"))
+        assert isinstance(result, AlertInsertResult)
+        assert result.inserted is True
+        assert result.record.id is not None
+        assert result.record.alert_kind == "anomaly_spike"
+        assert result.record.event_ref == "cgm:1"
+
+    def test_record_alert_returns_inserted_false_on_duplicate_event_ref(self, storage):
+        first = storage.record_alert(self._alert(event_ref="cgm:dup-insert"))
+        second = storage.record_alert(
+            self._alert(event_ref="cgm:dup-insert", payload={"new": "payload"})
+        )
+        assert first.inserted is True
+        assert second.inserted is False
+        assert second.record.id == first.record.id
 
     def test_record_duplicate_event_ref_returns_existing(self, storage):
         first = storage.record_alert(self._alert(event_ref="cgm:dup"))
         second = storage.record_alert(
             self._alert(event_ref="cgm:dup", payload={"new": "payload"})
         )
-        assert second.id == first.id
+        assert second.record.id == first.record.id
         all_alerts = storage.recent_alerts(
             "anomaly_spike", within=timedelta(days=365)
         )
