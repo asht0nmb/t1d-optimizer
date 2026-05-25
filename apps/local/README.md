@@ -24,15 +24,17 @@ uv run python main.py dashboard
 uv run streamlit run apps/local/app.py
 ```
 
-## Pages
+## Pages (interactive Plotly)
 
 | Page | Description |
 |------|-------------|
-| **Day view** | Multi-panel day chart (CGM, bolus, basal) — same logic as `main.py viz` |
-| **Heatmap** | Hour-of-day × date mean BG (up to 90 days) |
-| **Time in range** | Rolling 7 / 14 / 30-day TIR vs `bg_targets` in config |
+| **Day view** | Three linked panels (CGM, bolus/events, basal). Hover any marker for details; zoom/pan with scroll or toolbar. Prev/Next day, date picker, and jump slider for days with CGM data. |
+| **Heatmap** | Hour × date mean BG (up to 90 days). Hover cells for mean BG and reading count; click a cell to jump to that day in Day view. |
+| **Time in range** | 7 / 14 / 30-day TIR metrics plus a daily TIR trend line. Click a point to open that day in Day view. |
 
 Sidebar: **original** vs **enriched** view mode (same semantics as `check` / `viz`), doctor status (pipeline version + parquet presence), and sync commands.
+
+CLI `uv run python main.py viz` still uses static matplotlib; only this dashboard uses Plotly.
 
 ## Data layout
 
@@ -53,5 +55,17 @@ Both shells consume the same `core/` library and normalized table shapes; only t
 
 ```bash
 uv run pytest tests/test_local_dashboard.py -q
-MPLBACKEND=Agg uv run streamlit run apps/local/app.py --server.headless true
+uv run python main.py dashboard
 ```
+
+### Manual checklist
+
+- [ ] Hover CGM point (BG, range band, backfilled flag)
+- [ ] Hover bolus diamond (units, carbs, category in enriched view)
+- [ ] Hover basal step and suspension span
+- [ ] Zoom a post-meal window; double-click chart to reset axes
+- [ ] Prev / Next buttons and date picker move days consistently
+- [ ] Heatmap cell hover; click cell → Day view; fallback "Jump to date" picker works
+- [ ] TIR trend point click → Day view; 70 % goal band visible
+- [ ] Toggle original vs enriched (CGM gaps, bolus categories, site bands)
+- [ ] No `use_container_width` deprecation warnings in terminal
