@@ -65,6 +65,7 @@ from core.schema import TABLES, get_spec
 from core.storage._postgres_converters import COLUMN_SPECS, CONVERTERS
 from core.storage.memory import _require_tz_aware
 from core.storage.records import (
+    AlertInsertResult,
     AlertRecord,
     DetectionResult,
     FetchState,
@@ -474,7 +475,7 @@ class SupabaseStorage:
 
     # ── alerts ──────────────────────────────────────────────────────
 
-    def record_alert(self, alert: AlertRecord) -> AlertRecord:
+    def record_alert(self, alert: AlertRecord) -> AlertInsertResult:
         _require_tz_aware(alert.sent_at, "AlertRecord.sent_at")
         insert_sql = (
             "INSERT INTO alerts_sent "
@@ -500,7 +501,10 @@ class SupabaseStorage:
         self._conn.commit()
 
         if row is not None:
-            return _row_to_alert(dict(row))
+            return AlertInsertResult(
+                record=_row_to_alert(dict(row)),
+                inserted=True,
+            )
 
         # Conflict-skipped: fetch the existing row that won the dedup.
         # The partial unique index guarantees this is reachable only when
@@ -517,7 +521,7 @@ class SupabaseStorage:
         for _ in range(3):
             existing = self.find_alert(alert.alert_kind, alert.event_ref)
             if existing is not None:
-                return existing
+                return AlertInsertResult(record=existing, inserted=False)
             time.sleep(0.01)
         raise RuntimeError(
             f"record_alert: ON CONFLICT skipped insert of "

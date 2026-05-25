@@ -32,6 +32,7 @@ import pandas as pd
 from core.schema import get_spec
 from core.storage.memory import _require_tz_aware
 from core.storage.records import (
+    AlertInsertResult,
     AlertRecord,
     DetectionResult,
     FetchState,
@@ -503,7 +504,7 @@ class ParquetStorage:
         ]
         pd.DataFrame(rows).to_parquet(self._alerts_path(), index=False)
 
-    def record_alert(self, alert: AlertRecord) -> AlertRecord:
+    def record_alert(self, alert: AlertRecord) -> AlertInsertResult:
         _require_tz_aware(alert.sent_at, "AlertRecord.sent_at")
         records = self._load_alerts()
         if alert.event_ref is not None:
@@ -512,7 +513,7 @@ class ParquetStorage:
                     r.alert_kind == alert.alert_kind
                     and r.event_ref == alert.event_ref
                 ):
-                    return r
+                    return AlertInsertResult(record=r, inserted=False)
         rec = AlertRecord(
             id=alert.id if alert.id is not None else uuid.uuid4().hex,
             alert_kind=alert.alert_kind,
@@ -524,7 +525,7 @@ class ParquetStorage:
         )
         records.append(rec)
         self._write_alerts(records)
-        return rec
+        return AlertInsertResult(record=rec, inserted=True)
 
     def find_alert(
         self, alert_kind: str, event_ref: str
