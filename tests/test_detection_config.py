@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 from pathlib import Path
 
 import pytest
 import yaml
 
-from detection.config import AppConfig, get_config, load_config
+from detection.config import CONFIG_PATH, AppConfig, get_config, load_config
 
 
 _VALID_CONFIG_YAML = textwrap.dedent(
@@ -49,6 +50,24 @@ _VALID_CONFIG_YAML = textwrap.dedent(
       cartridge_real_fill_threshold: 220
       occlusion_cluster_window_minutes: 180
       min_occlusions_for_cluster: 2
+
+    meal_rise:
+      window_minutes: 30
+      fetch_buffer_minutes: 15
+      expected_interval_minutes: 5
+      fetch_readings_padding: 3
+      min_samples: 4
+      min_coverage: 0.7
+      base_slope_mgdl_per_min: 1.8
+      start_level_min: 70
+      start_level_max: 250
+      meal_windows:
+        - {start_hour: 6,  end_hour: 10, multiplier: 0.7}
+        - {start_hour: 11, end_hour: 14, multiplier: 0.7}
+        - {start_hour: 17, end_hour: 21, multiplier: 0.7}
+      off_hours_multiplier: 1.3
+      refractory_minutes: 60
+      alert_template: "Fast glucose rise"
     """
 ).strip()
 
@@ -91,6 +110,20 @@ class TestLoadConfig:
         assert cfg.site_change_detection.occlusion_cluster_window_minutes == 180
         assert cfg.site_change_detection.min_occlusions_for_cluster == 2
 
+        assert cfg.meal_rise.window_minutes == 30
+        assert cfg.meal_rise.min_samples == 4
+        assert cfg.meal_rise.min_coverage == 0.7
+        assert cfg.meal_rise.base_slope_mgdl_per_min == 1.8
+        assert cfg.meal_rise.start_level_min == 70
+        assert cfg.meal_rise.start_level_max == 250
+        assert len(cfg.meal_rise.meal_windows) == 3
+        assert cfg.meal_rise.off_hours_multiplier == 1.3
+        assert cfg.meal_rise.refractory_minutes == 60
+        assert cfg.meal_rise.fetch_buffer_minutes == 15
+        assert cfg.meal_rise.expected_interval_minutes == 5
+        assert cfg.meal_rise.fetch_readings_padding == 3
+        assert "Fast glucose rise" in cfg.meal_rise.alert_template
+
         assert cfg.timezone == "America/Los_Angeles"
         assert isinstance(cfg.raw, dict)
         assert cfg.raw["bg_targets"]["target"] == 110
@@ -117,11 +150,23 @@ class TestLoadConfig:
               cartridge_real_fill_threshold: 220
               occlusion_cluster_window_minutes: 180
               min_occlusions_for_cluster: 2
+            meal_rise:
+              window_minutes: 30
+              min_samples: 4
+              min_coverage: 0.7
+              base_slope_mgdl_per_min: 1.8
+              start_level_min: 70
+              start_level_max: 250
+              meal_windows: []
+              off_hours_multiplier: 1.3
+              refractory_minutes: 60
+              alert_template: "Alert"
             """
         ).strip()
         p = _write(tmp_path, body)
         with pytest.raises(KeyError, match="meal_detection"):
             load_config(p)
+
 
     def test_invalid_bg_targets_ordering(self, tmp_path):
         # target > high
@@ -157,6 +202,27 @@ class TestLoadConfig:
         with pytest.raises(ValueError):
             load_config(p)
 
+    def test_meal_rise_invalid_coverage_raises(self, tmp_path):
+        bad = _VALID_CONFIG_YAML.replace("min_coverage: 0.7", "min_coverage: 1.5")
+        p = _write(tmp_path, bad)
+        with pytest.raises(ValueError, match="min_coverage"):
+            load_config(p)
+
+    def test_meal_rise_invalid_start_levels_raises(self, tmp_path):
+        bad = _VALID_CONFIG_YAML.replace("start_level_min: 70", "start_level_min: 300")
+        p = _write(tmp_path, bad)
+        with pytest.raises(ValueError, match="start_level_min"):
+            load_config(p)
+
+    def test_meal_rise_meal_windows_dict_missing_key_raises(self, tmp_path):
+        bad = _VALID_CONFIG_YAML.replace(
+            "- {start_hour: 6,  end_hour: 10, multiplier: 0.7}",
+            "- {start_hour: 6, end_hour: 10}",
+        )
+        p = _write(tmp_path, bad)
+        with pytest.raises(KeyError, match="multiplier"):
+            load_config(p)
+
     def test_flatline_consecutive_intervals_default_when_missing(self, tmp_path):
         # Build a yaml without the key under anomaly_detection.
         body = _VALID_CONFIG_YAML.replace(
@@ -190,6 +256,15 @@ class TestLoadConfig:
     def test_timezone_sourced_from_ingestion_block(self, tmp_path):
         cfg = load_config()
         assert cfg.timezone == "America/Los_Angeles"
+
+    def test_config_path_resolves_from_repo_root(self, tmp_path, monkeypatch):
+        assert CONFIG_PATH.is_absolute()
+        assert CONFIG_PATH.name == "user_config.yaml"
+        assert CONFIG_PATH.parent.name == "config"
+
+        monkeypatch.chdir(tmp_path)
+        cfg = load_config(CONFIG_PATH)
+        assert cfg.meal_rise.window_minutes == 30
 
     def test_get_config_caches(self, monkeypatch):
         """get_config() should call yaml.safe_load only once across calls."""

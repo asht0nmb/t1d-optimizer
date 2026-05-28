@@ -22,6 +22,7 @@ import pandas as pd
 
 from core.schema import get_spec
 from core.storage.records import (
+    AlertInsertResult,
     AlertRecord,
     DetectionResult,
     FetchState,
@@ -176,12 +177,12 @@ class InMemoryStorage:
 
     # ── alerts ──────────────────────────────────────────────────────
 
-    def record_alert(self, alert: AlertRecord) -> AlertRecord:
+    def record_alert(self, alert: AlertRecord) -> AlertInsertResult:
         _require_tz_aware(alert.sent_at, "AlertRecord.sent_at")
         if alert.event_ref is not None:
             existing = self.find_alert(alert.alert_kind, alert.event_ref)
             if existing is not None:
-                return existing
+                return AlertInsertResult(record=existing, inserted=False)
         rec = AlertRecord(
             id=alert.id if alert.id is not None else uuid.uuid4().hex,
             alert_kind=alert.alert_kind,
@@ -192,7 +193,7 @@ class InMemoryStorage:
             delivery=alert.delivery,
         )
         self._alerts.append(rec)
-        return rec
+        return AlertInsertResult(record=rec, inserted=True)
 
     def find_alert(
         self, alert_kind: str, event_ref: str
