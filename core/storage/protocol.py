@@ -48,6 +48,7 @@ from typing import Protocol, runtime_checkable
 import pandas as pd
 
 from core.storage.records import (
+    AlertInsertResult,
     AlertRecord,
     DetectionResult,
     FetchState,
@@ -207,19 +208,19 @@ class Storage(Protocol):
 
     # ── alerts (live-path dedup) ─────────────────────────────────────
 
-    def record_alert(self, alert: AlertRecord) -> AlertRecord:
+    def record_alert(self, alert: AlertRecord) -> AlertInsertResult:
         """Insert an alert record.
 
         If ``alert.event_ref`` is non-``None`` and an alert with the
         same ``(alert_kind, event_ref)`` already exists, return the
-        existing record unchanged WITHOUT inserting a new one. This
-        mirrors the partial unique index on the Postgres
+        existing record with ``inserted=False`` WITHOUT inserting a new
+        one. This mirrors the partial unique index on the Postgres
         ``alerts_sent`` table.
 
         When the input ``alert.id`` is ``None`` and a new row is
         inserted, the implementation fabricates an id (Postgres:
         ``RETURNING id`` from the ``bigserial`` column; parquet:
-        ``uuid4``).
+        ``uuid4``) and sets ``inserted=True``.
 
         Raises :class:`ValueError` if ``alert.sent_at`` is
         timezone-naive — :meth:`recent_alerts` compares against

@@ -109,7 +109,9 @@ class TestPartialUniqueIndex:
         second = supabase_storage.record_alert(
             _alert(event_ref="cgm:dup", payload={"v": 2})
         )
-        assert second.id == first.id
+        assert first.inserted is True
+        assert second.inserted is False
+        assert second.record.id == first.record.id
         alerts = supabase_storage.recent_alerts(
             "anomaly_spike", within=timedelta(days=365)
         )
@@ -206,7 +208,7 @@ class TestCleanAllResetsIdentity:
         supabase_storage.record_alert(_alert(event_ref="cgm:1", sent_at=ts))
         supabase_storage.clean_all()
         rec = supabase_storage.record_alert(_alert(event_ref="cgm:2", sent_at=ts))
-        assert rec.id == "1"
+        assert rec.record.id == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +245,9 @@ class TestRecordExtensionsRoundTrip:
             delivery="sent",
         )
         inserted = supabase_storage.record_alert(rec)
-        assert inserted.pump_serial == "PUMP-A"
-        assert inserted.delivery == "sent"
+        assert inserted.inserted is True
+        assert inserted.record.pump_serial == "PUMP-A"
+        assert inserted.record.delivery == "sent"
 
         # Independent re-read via find_alert.
         got = supabase_storage.find_alert(
