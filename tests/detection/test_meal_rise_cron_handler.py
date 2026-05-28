@@ -44,3 +44,31 @@ def test_handler_accepts_valid_bearer(monkeypatch):
     assert out["statusCode"] == 200
     body = json.loads(out["body"])
     assert body["exit_code"] == 0
+
+
+def test_handler_returns_500_for_nonzero_exit(monkeypatch):
+    monkeypatch.setenv("CRON_SECRET", "expected")
+    monkeypatch.setattr(
+        "apps.personal.cron.detect_meal_rise.run_cron",
+        lambda: 2,
+    )
+    req = SimpleNamespace(headers={"Authorization": "Bearer expected"})
+    out = meal_rise_cron.handler(req)
+    assert out["statusCode"] == 500
+    body = json.loads(out["body"])
+    assert body["exit_code"] == 2
+
+
+def test_handler_returns_500_when_run_cron_raises(monkeypatch):
+    monkeypatch.setenv("CRON_SECRET", "expected")
+
+    def _boom() -> int:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("apps.personal.cron.detect_meal_rise.run_cron", _boom)
+    req = SimpleNamespace(headers={"Authorization": "Bearer expected"})
+    out = meal_rise_cron.handler(req)
+    assert out["statusCode"] == 500
+    body = json.loads(out["body"])
+    assert body["error"] == "cron_execution_failed"
+    assert "boom" in body["detail"]

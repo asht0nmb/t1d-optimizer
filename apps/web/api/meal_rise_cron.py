@@ -46,7 +46,15 @@ def handler(request: Any) -> dict[str, Any]:
 
     from apps.personal.cron.detect_meal_rise import run_cron
 
-    exit_code = run_cron()
+    try:
+        exit_code = run_cron()
+    except Exception as exc:  # pragma: no cover - defensive serverless guard
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "cron_execution_failed", "detail": str(exc)}),
+        }
+
     return {
         "statusCode": 200 if exit_code == 0 else 500,
         "headers": {"Content-Type": "application/json"},
