@@ -2,14 +2,33 @@
 
 import { useEffect, useState } from "react";
 import { CompareChart } from "@/components/CompareChart";
-import type { CompareResponse } from "@/lib/types/api";
+import type { CompareResponse, ConfigResponse } from "@/lib/types/api";
 import { defaultCompareDate } from "@/lib/dates";
 
 export default function ComparePage() {
   const [dateA, setDateA] = useState("2026-04-14");
   const [dateB, setDateB] = useState(defaultCompareDate("2026-04-14"));
+  const [minDate, setMinDate] = useState<string | undefined>(undefined);
+  const [maxDate, setMaxDate] = useState<string | undefined>(undefined);
   const [data, setData] = useState<CompareResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/config")
+      .then((r) => r.json() as Promise<ConfigResponse>)
+      .then((config) => {
+        const bounds = config.date_bounds;
+        if (!bounds) return;
+        setMinDate(bounds.min_date);
+        setMaxDate(bounds.max_date);
+        setDateA(bounds.max_date);
+        const prior = defaultCompareDate(bounds.max_date);
+        setDateB(prior < bounds.min_date ? bounds.min_date : prior);
+      })
+      .catch(() => {
+        // Keep hardcoded fallback when config endpoint is unavailable.
+      });
+  }, []);
 
   useEffect(() => {
     fetch(`/api/compare?a=${dateA}&b=${dateB}`)
@@ -30,6 +49,8 @@ export default function ComparePage() {
             type="date"
             value={dateA}
             onChange={(e) => setDateA(e.target.value)}
+            min={minDate}
+            max={maxDate}
             className="mt-1 block rounded border border-slate-300 px-2 py-1"
           />
         </label>
@@ -39,6 +60,8 @@ export default function ComparePage() {
             type="date"
             value={dateB}
             onChange={(e) => setDateB(e.target.value)}
+            min={minDate}
+            max={maxDate}
             className="mt-1 block rounded border border-slate-300 px-2 py-1"
           />
         </label>

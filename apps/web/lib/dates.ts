@@ -3,6 +3,14 @@ import { addDays, format, parseISO } from "date-fns";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+export function coerceDateParam(value: string | null): string | null {
+  if (!value) return null;
+  if (DATE_RE.test(value) && isValidDateParam(value)) return value;
+  const parsed = parseISO(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return format(parsed, "yyyy-MM-dd");
+}
+
 export function isValidDateParam(dateStr: string): boolean {
   if (!DATE_RE.test(dateStr)) return false;
   const d = parseISO(dateStr);

@@ -6,6 +6,17 @@ export interface BgTargets {
   target: number;
 }
 
+export interface DateBounds {
+  min_date: string;
+  max_date: string;
+}
+
+export interface ConfigResponse {
+  bg_targets: BgTargets;
+  timezone: string;
+  date_bounds: DateBounds | null;
+}
+
 export interface CgmPoint {
   timestamp: string;
   bg_mgdl: number;
