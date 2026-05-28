@@ -29,8 +29,9 @@ describe("GET /api/cron/meal-rise", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       ok: true,
-      handler: "/api/meal_rise_cron",
-      message: "Vercel Cron invokes the Python serverless function at /api/meal_rise_cron",
+      mode: "health_only",
+      scheduler: "external",
+      message: "Meal-rise cron execution runs outside the Next.js web deployment.",
     });
   });
 });

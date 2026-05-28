@@ -5,6 +5,9 @@
 .env*
 !.env.example
 
+# Cursor ignore
+.cursorignore
+
 # tconnectsync credential cache (written to cwd on auth)
 .creds_cache
 .config/tconnectsync/

@@ -40,7 +40,7 @@ Magic link is used (not GitHub OAuth) to keep single-user setup minimal.
 | `TZ` | server | Calendar-day windows (default `America/Los_Angeles`) |
 | `DEFAULT_PUMP_SERIAL` | server | Optional single-pump filter |
 | `USER_CONFIG_PATH` | server | Optional JSON/YAML path for `bg_targets` |
-| `CRON_SECRET` | cron only | Bearer token for `/api/meal_rise_cron` (set this in your external scheduler auth header) |
+| `CRON_SECRET` | cron health endpoint | Bearer token for `/api/cron/meal-rise` (manual checks only) |
 | `DEXCOM_USERNAME` / `DEXCOM_PASSWORD` | cron only | Dexcom Share credentials for live CGM poll |
 | `DEXCOM_OUS` | cron only | `true` for non-US Dexcom accounts |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | cron only | Missed-meal alert delivery |
@@ -49,16 +49,31 @@ BG targets default to `config/bg-targets.json` (synced from repo `config/user_co
 
 ### Meal-rise cron (M1)
 
-An external scheduler (for example cron-job.org) should call `/api/meal_rise_cron` every five minutes. The Python serverless handler calls `apps/personal/cron/detect_meal_rise.run_cron()` with monorepo `includeFiles` for `core/`, `detection/`, and `config/`.
+Production meal-rise execution runs outside the Next.js web deployment using GitHub Actions workflow `.github/workflows/meal-rise-cron.yml` on a 5-minute schedule. The web route `/api/cron/meal-rise` is an authenticated health endpoint only.
 
 Manual check (after deploy):
 
 ```bash
 curl -s -H "Authorization: Bearer $CRON_SECRET" https://YOUR_APP.vercel.app/api/cron/meal-rise
-curl -s -H "Authorization: Bearer $CRON_SECRET" https://YOUR_APP.vercel.app/api/meal_rise_cron
 ```
+Confirm the response includes `"mode":"health_only"`.
 
-Confirm one invocation in Vercel → Project → Cron Jobs / Functions logs.
+Scheduler runbook:
+
+1. In GitHub repo settings, set workflow secrets:
+   - `SUPABASE_DB_URL`
+   - `DEXCOM_USERNAME`, `DEXCOM_PASSWORD`, optional `DEXCOM_OUS`
+   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+   - optional `USER_CONFIG_PATH`
+2. Run the workflow manually once (`Actions -> Meal Rise Cron -> Run workflow`).
+3. Confirm logs include either:
+   - `No fast rise detected; exiting cleanly.` or
+   - `Alert handled ...`
+4. Confirm `detection_results` rows appear in Supabase with `kind="meal_rise"` and payload keys:
+   - `event_ref`
+   - `delivery_stage` (`initial` or `retry`)
+   - `delivery_attempt`
+   - `telegram_sent`
 
 ## Pages (Phase A)
 

@@ -6,11 +6,12 @@ import pandas as pd
 from core.detection.meal_rise import detect_meal_rise
 from core.detection.windowing import Anchor, make_window
 from core.storage.memory import InMemoryStorage
-from core.storage.records import AlertRecord
+from core.storage.records import AlertRecord, DetectionResult
 from apps.personal.cron.detect_meal_rise import (
     dexcom_max_count,
     handle_detection_alert,
     normalize_dexcom_readings,
+    retry_failed_alert_deliveries,
     run_cron,
     get_storage_connection,
 )
@@ -112,6 +113,29 @@ def test_handle_detection_alert_same_anchor_second_run_suppressed(
 
     assert send.call_count == 1
     assert len(memory_storage.list_detection_results(kind="meal_rise")) == 1
+
+
+def test_handle_detection_alert_failed_delivery_is_partial_success(
+    memory_storage, cron_config, breakfast_detection, mock_env
+):
+    send = MagicMock(return_value=False)
+    latest_ts = breakfast_detection.anchor_timestamp
+
+    assert (
+        handle_detection_alert(
+            memory_storage,
+            cron_config,
+            breakfast_detection,
+            latest_ts=latest_ts,
+            send_telegram=send,
+        )
+        == "partial_success"
+    )
+    detection_rows = memory_storage.list_detection_results(kind="meal_rise")
+    assert len(detection_rows) == 1
+    assert detection_rows[0].payload["telegram_sent"] is False
+    assert detection_rows[0].payload["delivery_stage"] == "initial"
+    assert detection_rows[0].payload["delivery_attempt"] == 1
 
 
 def test_handle_detection_alert_claim_lost_race_suppresses_telegram(
@@ -279,6 +303,7 @@ def test_normalize_dexcom_readings_one_per_bucket():
 def test_get_storage_connection_parquet(monkeypatch):
     """Test get_storage_connection falls back to ParquetStorage with correct root."""
     monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.setenv("MEAL_RISE_ALLOW_PARQUET_FALLBACK", "true")
     from core.storage.parquet import ParquetStorage
     
     storage, conn = get_storage_connection()
@@ -287,6 +312,13 @@ def test_get_storage_connection_parquet(monkeypatch):
     # Verify the root is set to the canonical PROCESSED_DIR
     from ingestion.storage import PROCESSED_DIR
     assert storage.root == PROCESSED_DIR
+
+
+def test_get_storage_connection_requires_db_url_or_explicit_parquet_flag(monkeypatch):
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.delenv("MEAL_RISE_ALLOW_PARQUET_FALLBACK", raising=False)
+    with pytest.raises(RuntimeError, match="SUPABASE_DB_URL is required"):
+        get_storage_connection()
 
 
 def test_get_storage_connection_supabase(monkeypatch):
@@ -321,4 +353,104 @@ def test_normalize_dexcom_readings_dst_transition():
     # This should not raise AmbiguousTimeError or NonExistentTimeError!
     out = normalize_dexcom_readings(df, interval_minutes=5)
     assert not out.empty
+
+
+def test_retry_failed_alert_deliveries_retries_after_backoff(
+    memory_storage, cron_config, breakfast_detection
+):
+    latest_ts = breakfast_detection.anchor_timestamp
+    event_ref = f"meal_rise:{latest_ts.isoformat(timespec='minutes')}"
+    now = datetime(2026, 5, 25, 16, 0, tzinfo=UTC)
+
+    memory_storage.record_alert(
+        AlertRecord(
+            id=None,
+            alert_kind="meal_rise",
+            event_ref=event_ref,
+            sent_at=now - timedelta(minutes=30),
+            payload={
+                **breakfast_detection.to_payload(),
+                "event_ref": event_ref,
+                "alert_message": "retry me",
+            },
+            pump_serial=None,
+            delivery="pending",
+        )
+    )
+    memory_storage.record_detection_result(
+        DetectionResult(
+            kind="meal_rise",
+            anchor_timestamp=latest_ts,
+            payload={
+                **breakfast_detection.to_payload(),
+                "event_ref": event_ref,
+                "telegram_sent": False,
+                "telegram_error": "delivery_failed",
+                "delivery_stage": "initial",
+                "delivery_attempt": 1,
+            },
+            created_at=now - timedelta(minutes=20),
+        )
+    )
+    send = MagicMock(return_value=True)
+
+    summary = retry_failed_alert_deliveries(
+        memory_storage,
+        cron_config,
+        send_telegram=send,
+        now=now,
+    )
+    assert summary == {"retried": 1, "succeeded": 1}
+    send.assert_called_once_with("retry me")
+    results = memory_storage.list_detection_results(kind="meal_rise")
+    assert results[0].payload["delivery_stage"] == "retry"
+    assert results[0].payload["delivery_attempt"] == 2
+    assert results[0].payload["telegram_sent"] is True
+
+
+def test_retry_failed_alert_deliveries_respects_backoff(
+    memory_storage, cron_config, breakfast_detection
+):
+    latest_ts = breakfast_detection.anchor_timestamp
+    event_ref = f"meal_rise:{latest_ts.isoformat(timespec='minutes')}"
+    now = datetime(2026, 5, 25, 16, 0, tzinfo=UTC)
+
+    memory_storage.record_alert(
+        AlertRecord(
+            id=None,
+            alert_kind="meal_rise",
+            event_ref=event_ref,
+            sent_at=now - timedelta(minutes=2),
+            payload={
+                **breakfast_detection.to_payload(),
+                "event_ref": event_ref,
+                "alert_message": "too soon",
+            },
+            pump_serial=None,
+            delivery="pending",
+        )
+    )
+    memory_storage.record_detection_result(
+        DetectionResult(
+            kind="meal_rise",
+            anchor_timestamp=latest_ts,
+            payload={
+                "event_ref": event_ref,
+                "telegram_sent": False,
+                "delivery_stage": "initial",
+                "delivery_attempt": 1,
+            },
+            created_at=now - timedelta(minutes=1),
+        )
+    )
+
+    send = MagicMock(return_value=True)
+    summary = retry_failed_alert_deliveries(
+        memory_storage,
+        cron_config,
+        send_telegram=send,
+        now=now,
+    )
+    assert summary == {"retried": 0, "succeeded": 0}
+    send.assert_not_called()
 

@@ -1,4 +1,4 @@
-# 2026-05-28 Cron Middleware Validation
+# 2026-05-28 Cron Stabilization & Middleware Validation
 
 ## What I tested
 
@@ -32,7 +32,7 @@
   - raised exception in `run_cron()` => HTTP 500 + error payload
 - Added direct Next route tests for `/api/cron/meal-rise` GET:
   - unauthorized path => 401
-  - valid bearer => health payload describing Python cron handler path
+  - valid bearer => health payload indicating `health_only` mode
 - Investigated live deployed endpoint responses:
   - Both cron endpoints returned `500` with `x-vercel-error: MIDDLEWARE_INVOCATION_FAILED`.
   - `/login` also returned the same 500, indicating global middleware crash risk in deployment.
@@ -40,13 +40,23 @@
   - `hasSupabaseMiddlewareEnv()` checks required public Supabase env vars.
   - `updateSession()` now fails open (`NextResponse.next`) when env is missing, preventing full-route outage caused by middleware init failures.
 - Added tests for middleware env guard behavior under missing/present env.
-- Removed Vercel-managed `crons` config from `apps/web/vercel.json` so Hobby-plan deploys do not fail on schedule limits; cron triggering is now expected from an external scheduler (cron-job.org) hitting `/api/meal_rise_cron` with `Authorization: Bearer <CRON_SECRET>`.
+- Removed Vercel-managed cron config and unsupported function pattern assumptions from `apps/web/vercel.json` to avoid Next.js build failures on Hobby.
+- Moved primary cron execution to GitHub Actions (`.github/workflows/meal-rise-cron.yml`) every 5 minutes.
+- Updated web route/docs so `/api/cron/meal-rise` is explicitly an authenticated health endpoint, not the production runner.
+- Added cron reliability hardening in `apps/personal/cron/detect_meal_rise.py`:
+  - `SUPABASE_DB_URL` required by default (Parquet fallback allowed only when `MEAL_RISE_ALLOW_PARQUET_FALLBACK=true` for local tests)
+  - partial-success semantics for Telegram delivery failures
+  - persisted delivery metadata (`event_ref`, `delivery_stage`, `delivery_attempt`, `telegram_sent`)
+  - retry pass with configurable lookback/backoff/max attempts for failed deliveries
+- Expanded Python tests for:
+  - partial-success outcome on delivery failure
+  - retry-after-backoff behavior
+  - backoff suppression
+  - no-DB safeguard behavior
 
-## Follow-up plan
+## Rollout checklist
 
-1. Confirm production cron path:
-   - Keep Vercel Python cron endpoint (`/api/meal_rise_cron`) and Next route cron endpoint (`/api/cron/meal-rise`) behavior documented so scheduling/auth are unambiguous.
-2. Add deploy-time smoke:
-   - Add a lightweight CI or post-deploy check that hits cron endpoints with/without auth and verifies status codes.
-3. Reduce auth ambiguity:
-   - Standardize cron auth validation helper shape between Python and Next handlers (header parsing, explicit error payload).
+1. Deploy `main` and confirm `/api/cron/meal-rise` returns `401` without bearer and `200` with bearer.
+2. Configure GitHub Actions secrets for `meal-rise-cron.yml`.
+3. Manually run one workflow dispatch and verify `detection_results` write path in Supabase.
+4. Confirm scheduled runs execute every 5 minutes without Vercel cron dependency.
