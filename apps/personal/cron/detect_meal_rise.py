@@ -22,7 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from dotenv import load_dotenv
 import pandas as pd
 import requests
-from pydexcom import Dexcom
+from pydexcom import Dexcom, Region
 
 from core.detection import Anchor, make_window, detect_meal_rise
 from core.detection.meal_rise import MealRiseConfig, MealRiseDetection
@@ -101,6 +101,7 @@ def fetch_dexcom_cgm(meal_rise_config: MealRiseConfig, tz_name: str) -> pd.DataF
     password = os.environ.get("DEXCOM_PASSWORD") or os.environ.get("TCONNECT_PASSWORD")
     ous_raw = os.environ.get("DEXCOM_OUS", "false").lower()
     ous = ous_raw in ("true", "1", "yes")
+    region = Region.OUS if ous else Region.US
 
     if not username or not password:
         raise ValueError(
@@ -108,7 +109,7 @@ def fetch_dexcom_cgm(meal_rise_config: MealRiseConfig, tz_name: str) -> pd.DataF
         )
 
     logger.info("Connecting to Dexcom Share API (username: %s)...", username)
-    dexcom = Dexcom(username, password, ous=ous)
+    dexcom = Dexcom(username=username, password=password, region=region)
 
     max_count = dexcom_max_count(
         meal_rise_config.window_minutes,
