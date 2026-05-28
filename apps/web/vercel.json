@@ -1,9 +1,3 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/meal_rise_cron.py": {
-      "maxDuration": 60,
-      "includeFiles": "../../core/**,../../detection/**,../../config/**,../../apps/personal/**"
-    }
-  }
+  "$schema": "https://openapi.vercel.sh/vercel.json"
 }

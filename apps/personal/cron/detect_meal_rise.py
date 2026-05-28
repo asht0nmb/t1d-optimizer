@@ -30,12 +30,15 @@ from core.storage.protocol import Storage
 from core.storage.records import AlertRecord, DetectionResult
 from detection.config import AppConfig, get_config
 
-MealRiseAlertOutcome = Literal["sent", "suppressed", "failed_config"]
+MealRiseAlertOutcome = Literal["sent", "suppressed", "failed_config", "partial_success"]
 
 # Load environment
 load_dotenv()
 
 logger = logging.getLogger("meal_rise_cron")
+DEFAULT_RETRY_LOOKBACK_HOURS = 24
+DEFAULT_RETRY_BACKOFF_MINUTES = 15
+DEFAULT_RETRY_MAX_ATTEMPTS = 3
 
 
 def dexcom_max_count(
@@ -85,6 +88,12 @@ def get_storage_connection() -> Any:
             logger.error("psycopg2 is not installed; cannot connect to Supabase.")
             raise
     else:
+        allow_parquet = os.environ.get("MEAL_RISE_ALLOW_PARQUET_FALLBACK", "").lower()
+        if allow_parquet not in {"1", "true", "yes"}:
+            raise RuntimeError(
+                "SUPABASE_DB_URL is required for cron execution. "
+                "Set MEAL_RISE_ALLOW_PARQUET_FALLBACK=true only for local testing."
+            )
         from core.storage.parquet import ParquetStorage
         from ingestion.storage import PROCESSED_DIR
         logger.info("Initializing ParquetStorage connection...")
@@ -168,6 +177,120 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
         return False
 
 
+def _retry_settings(config: AppConfig) -> tuple[timedelta, timedelta, int]:
+    meal_rise_raw = config.raw.get("meal_rise", {})
+    lookback_hours = int(meal_rise_raw.get("delivery_retry_lookback_hours", DEFAULT_RETRY_LOOKBACK_HOURS))
+    backoff_minutes = int(meal_rise_raw.get("delivery_retry_backoff_minutes", DEFAULT_RETRY_BACKOFF_MINUTES))
+    max_attempts = int(meal_rise_raw.get("delivery_retry_max_attempts", DEFAULT_RETRY_MAX_ATTEMPTS))
+    return timedelta(hours=lookback_hours), timedelta(minutes=backoff_minutes), max_attempts
+
+
+def _anchor_from_payload(payload: dict[str, Any], fallback: datetime) -> datetime:
+    raw_anchor = payload.get("anchor_timestamp")
+    if isinstance(raw_anchor, str):
+        try:
+            anchor = datetime.fromisoformat(raw_anchor)
+            if anchor.tzinfo is None:
+                return anchor.replace(tzinfo=timezone.utc)
+            return anchor
+        except ValueError:
+            logger.warning("Invalid anchor_timestamp in payload: %s", raw_anchor)
+    return fallback
+
+
+def _delivery_history_by_event_ref(
+    storage: Storage,
+    *,
+    since: datetime,
+) -> dict[str, list[DetectionResult]]:
+    out: dict[str, list[DetectionResult]] = {}
+    results = storage.list_detection_results(kind="meal_rise", since=since, limit=1000)
+    for result in results:
+        event_ref = result.payload.get("event_ref")
+        if not isinstance(event_ref, str):
+            continue
+        out.setdefault(event_ref, []).append(result)
+    return out
+
+
+def retry_failed_alert_deliveries(
+    storage: Storage,
+    config: AppConfig,
+    *,
+    send_telegram: Callable[[str], bool],
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Retry failed Telegram deliveries for claimed meal-rise alerts."""
+    now = now or datetime.now(timezone.utc)
+    lookback, backoff, max_attempts = _retry_settings(config)
+    history_by_ref = _delivery_history_by_event_ref(storage, since=now - lookback)
+    retried = 0
+    succeeded = 0
+
+    # Query a wide alert window to avoid coupling retry logic to the storage backend's notion of "now".
+    # We apply the actual lookback filter against the injected ``now`` below.
+    for alert in storage.recent_alerts("meal_rise", timedelta(days=3650)):
+        if alert.sent_at < now - lookback:
+            continue
+        event_ref = alert.event_ref
+        if not event_ref:
+            continue
+
+        history = history_by_ref.get(event_ref, [])
+        if any(item.payload.get("telegram_sent") is True for item in history):
+            continue
+
+        failed_history = [item for item in history if item.payload.get("telegram_sent") is False]
+        if not failed_history:
+            continue
+
+        attempts = max(
+            (
+                int(item.payload.get("delivery_attempt", 0))
+                for item in history
+                if isinstance(item.payload.get("delivery_attempt"), int)
+            ),
+            default=len(failed_history),
+        )
+        if attempts >= max_attempts:
+            continue
+
+        latest_attempt_at = max(item.created_at for item in history)
+        if now - latest_attempt_at < backoff:
+            continue
+
+        payload = dict(alert.payload or {})
+        message = payload.get("alert_message")
+        if not isinstance(message, str) or not message:
+            logger.warning("Skipping retry for %s: missing alert_message", event_ref)
+            continue
+
+        telegram_sent = send_telegram(message)
+        retried += 1
+        if telegram_sent:
+            succeeded += 1
+
+        payload["event_ref"] = event_ref
+        payload["telegram_sent"] = telegram_sent
+        payload["delivery_stage"] = "retry"
+        payload["delivery_attempt"] = attempts + 1
+        if not telegram_sent:
+            payload["telegram_error"] = "delivery_failed"
+        else:
+            payload.pop("telegram_error", None)
+
+        storage.record_detection_result(
+            DetectionResult(
+                kind="meal_rise",
+                anchor_timestamp=_anchor_from_payload(payload, fallback=now),
+                payload=payload,
+                created_at=now,
+            )
+        )
+
+    return {"retried": retried, "succeeded": succeeded}
+
+
 def handle_detection_alert(
     storage: Storage,
     config: AppConfig,
@@ -199,7 +322,16 @@ def handle_detection_alert(
         logger.error("Missing Telegram configuration; cannot send alert.")
         return "failed_config"
 
+    msg = config.meal_rise.alert_template.format(
+        start=detection.start_level,
+        end=detection.end_level,
+        delta=detection.delta,
+        minutes=int(detection.minutes_span),
+    )
+
     claim_payload = dict(detection.to_payload())
+    claim_payload["event_ref"] = event_ref
+    claim_payload["alert_message"] = msg
     claim_result = storage.record_alert(
         AlertRecord(
             id=None,
@@ -215,16 +347,13 @@ def handle_detection_alert(
         logger.info("Suppressed: lost claim race for %s", event_ref)
         return "suppressed"
 
-    msg = config.meal_rise.alert_template.format(
-        start=detection.start_level,
-        end=detection.end_level,
-        delta=detection.delta,
-        minutes=int(detection.minutes_span),
-    )
-
     telegram_sent = send_telegram(msg)
     result_payload = dict(detection.to_payload())
+    result_payload["event_ref"] = event_ref
+    result_payload["alert_message"] = msg
     result_payload["telegram_sent"] = telegram_sent
+    result_payload["delivery_stage"] = "initial"
+    result_payload["delivery_attempt"] = 1
     if not telegram_sent:
         result_payload["telegram_error"] = "delivery_failed"
 
@@ -238,7 +367,9 @@ def handle_detection_alert(
     )
 
     logger.info("Alert handled for %s (telegram_sent=%s)", event_ref, telegram_sent)
-    return "sent"
+    if telegram_sent:
+        return "sent"
+    return "partial_success"
 
 
 def run_cron() -> int:
@@ -254,7 +385,31 @@ def run_cron() -> int:
         logger.exception("Failed to connect to storage: %s", e)
         return 1
 
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or config.raw.get(
+        "notifications", {}
+    ).get("telegram_bot_token")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or config.raw.get(
+        "notifications", {}
+    ).get("telegram_chat_id")
+
+    def _send(msg: str) -> bool:
+        if not bot_token or not chat_id:
+            return False
+        return send_telegram_message(bot_token, chat_id, msg)
+
     try:
+        retry_summary = retry_failed_alert_deliveries(
+            storage,
+            config,
+            send_telegram=_send,
+        )
+        if retry_summary["retried"] > 0:
+            logger.info(
+                "Retry delivery pass complete (retried=%d, succeeded=%d).",
+                retry_summary["retried"],
+                retry_summary["succeeded"],
+            )
+
         # 3. Fetch recent CGM
         cgm_df = fetch_dexcom_cgm(config.meal_rise, tz_name)
         if cgm_df.empty:
@@ -295,18 +450,6 @@ def run_cron() -> int:
             detection.delta,
             detection.threshold_used
         )
-
-        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or config.raw.get(
-            "notifications", {}
-        ).get("telegram_bot_token")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID") or config.raw.get(
-            "notifications", {}
-        ).get("telegram_chat_id")
-
-        def _send(msg: str) -> bool:
-            if not bot_token or not chat_id:
-                return False
-            return send_telegram_message(bot_token, chat_id, msg)
 
         outcome = handle_detection_alert(
             storage,
