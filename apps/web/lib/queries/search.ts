@@ -1,6 +1,7 @@
 import { queryRows } from "@/lib/queries/db";
 import { loadBgTargets } from "@/lib/config";
 import type { SearchResponse, SearchResultRow } from "@/lib/types/api";
+import { resolveAnchorDay, windowStart } from "@/lib/queries/window-anchor";
 
 interface SearchRow {
   day: string;
@@ -25,13 +26,16 @@ export async function searchDays(
 ): Promise<SearchResponse> {
   const targets = loadBgTargets();
   const tz = filters.timezone ?? "America/Los_Angeles";
+  const anchorDay = await resolveAnchorDay(tz, pumpSerial);
+  const startDay = windowStart(anchorDay, 365);
   const page = filters.page ?? 1;
   const pageSize = filters.pageSize ?? 30;
   const offset = (page - 1) * pageSize;
 
-  const params: unknown[] = [targets.low, targets.high, tz];
+  const params: unknown[] = [targets.low, targets.high, tz, startDay, anchorDay];
   const where: string[] = [
-    "c.timestamp >= CURRENT_DATE - interval '365 days'",
+    "c.timestamp >= $4::date",
+    "c.timestamp < ($5::date + interval '1 day')",
   ];
   const having: string[] = [];
 
@@ -70,8 +74,9 @@ export async function searchDays(
         (a.timestamp AT TIME ZONE $3)::date AS day,
         COUNT(*) FILTER (WHERE a.action = 'activated')::int AS alarm_count
       FROM alarms a
-      WHERE a.timestamp >= CURRENT_DATE - interval '365 days'
-        ${pumpSerial ? `AND a.pump_serial = $4` : ""}
+      WHERE a.timestamp >= $4::date
+        AND a.timestamp < ($5::date + interval '1 day')
+        ${pumpSerial ? `AND a.pump_serial = $6` : ""}
       GROUP BY 1
     ),
     joined AS (

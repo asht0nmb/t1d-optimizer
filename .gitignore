@@ -47,3 +47,4 @@ data/models/
 
 # Other logs
 tconnectsync-check-output.log
+node_modules/

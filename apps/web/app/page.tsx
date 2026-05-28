@@ -1,12 +1,29 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { format } from "date-fns";
+import type { ConfigResponse } from "@/lib/types/api";
 
 export default function HomePage() {
   const router = useRouter();
   const [date, setDate] = useState(format(new Date(), "yyyy-MM-dd"));
+  const [maxDate, setMaxDate] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    fetch("/api/config")
+      .then((r) => r.json() as Promise<ConfigResponse>)
+      .then((config) => {
+        const nextDate = config.date_bounds?.max_date;
+        if (nextDate) {
+          setDate(nextDate);
+          setMaxDate(nextDate);
+        }
+      })
+      .catch(() => {
+        // Keep local-date fallback when config is unavailable.
+      });
+  }, []);
 
   function go(e: React.FormEvent) {
     e.preventDefault();
@@ -26,6 +43,7 @@ export default function HomePage() {
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
+            max={maxDate}
             className="mt-1 block rounded border border-slate-300 px-3 py-2"
           />
         </label>

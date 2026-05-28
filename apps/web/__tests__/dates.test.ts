@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  coerceDateParam,
   dayWindowUtc,
   isValidDateParam,
   todayInTimezone,
@@ -12,6 +13,21 @@ describe("isValidDateParam", () => {
   it("rejects invalid dates", () => {
     expect(isValidDateParam("2026-13-40")).toBe(false);
     expect(isValidDateParam("04-14-2026")).toBe(false);
+  });
+});
+
+describe("coerceDateParam", () => {
+  it("accepts YYYY-MM-DD as-is", () => {
+    expect(coerceDateParam("2026-04-14")).toBe("2026-04-14");
+  });
+
+  it("coerces ISO datetime into YYYY-MM-DD", () => {
+    expect(coerceDateParam("2026-04-14T12:34:56.000Z")).toBe("2026-04-14");
+  });
+
+  it("returns null for invalid values", () => {
+    expect(coerceDateParam("not-a-date")).toBeNull();
+    expect(coerceDateParam(null)).toBeNull();
   });
 });
 

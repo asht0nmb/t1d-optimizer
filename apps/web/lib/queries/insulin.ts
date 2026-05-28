@@ -1,5 +1,6 @@
 import { queryRows } from "@/lib/queries/db";
 import type { InsulinDayRow, InsulinResponse } from "@/lib/types/api";
+import { resolveAnchorDay, windowStart } from "@/lib/queries/window-anchor";
 
 interface InsulinRow {
   day: string;
@@ -12,7 +13,9 @@ export async function fetchInsulinHistory(
   timezone: string,
   pumpSerial?: string,
 ): Promise<InsulinResponse> {
-  const params: unknown[] = [days, timezone];
+  const anchorDay = await resolveAnchorDay(timezone, pumpSerial);
+  const startDay = windowStart(anchorDay, days);
+  const params: unknown[] = [timezone, startDay, anchorDay];
   let pumpClause = "";
   if (pumpSerial) {
     params.push(pumpSerial);
@@ -22,26 +25,28 @@ export async function fetchInsulinHistory(
   const sql = `
     WITH days AS (
       SELECT generate_series(
-        CURRENT_DATE - ($1::int - 1) * interval '1 day',
-        CURRENT_DATE,
+        $2::date,
+        $3::date,
         interval '1 day'
       )::date AS day
     ),
     bolus_daily AS (
       SELECT
-        (timestamp AT TIME ZONE $2)::date AS day,
+        (timestamp AT TIME ZONE $1)::date AS day,
         SUM(insulin_units)::float AS bolus_units
       FROM bolus
-      WHERE timestamp >= CURRENT_DATE - ($1::int - 1) * interval '1 day'
+      WHERE timestamp >= $2::date
+        AND timestamp < ($3::date + interval '1 day')
         ${pumpClause}
       GROUP BY 1
     ),
     basal_daily AS (
       SELECT
-        (timestamp AT TIME ZONE $2)::date AS day,
+        (timestamp AT TIME ZONE $1)::date AS day,
         SUM(commanded_rate * 5.0 / 60.0)::float AS basal_units
       FROM basal
-      WHERE timestamp >= CURRENT_DATE - ($1::int - 1) * interval '1 day'
+      WHERE timestamp >= $2::date
+        AND timestamp < ($3::date + interval '1 day')
         ${pumpClause}
       GROUP BY 1
     )

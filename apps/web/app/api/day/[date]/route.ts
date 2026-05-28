@@ -1,4 +1,4 @@
-import { isValidDateParam } from "@/lib/dates";
+import { coerceDateParam } from "@/lib/dates";
 import { getPumpSerial, getTimezone } from "@/lib/config";
 import { fetchDayView } from "@/lib/queries/day";
 import { createServiceClient } from "@/lib/supabase/server";
@@ -8,8 +8,8 @@ export async function GET(
   _req: Request,
   { params }: { params: { date: string } },
 ) {
-  const { date } = params;
-  if (!isValidDateParam(date)) {
+  const date = coerceDateParam(params.date);
+  if (!date) {
     return jsonError("Invalid date; use YYYY-MM-DD", 400);
   }
   try {
