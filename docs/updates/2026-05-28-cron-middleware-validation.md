@@ -40,6 +40,7 @@
   - `hasSupabaseMiddlewareEnv()` checks required public Supabase env vars.
   - `updateSession()` now fails open (`NextResponse.next`) when env is missing, preventing full-route outage caused by middleware init failures.
 - Added tests for middleware env guard behavior under missing/present env.
+- Removed Vercel-managed `crons` config from `apps/web/vercel.json` so Hobby-plan deploys do not fail on schedule limits; cron triggering is now expected from an external scheduler (cron-job.org) hitting `/api/meal_rise_cron` with `Authorization: Bearer <CRON_SECRET>`.
 
 ## Follow-up plan
 

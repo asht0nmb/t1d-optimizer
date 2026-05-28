@@ -40,7 +40,7 @@ Magic link is used (not GitHub OAuth) to keep single-user setup minimal.
 | `TZ` | server | Calendar-day windows (default `America/Los_Angeles`) |
 | `DEFAULT_PUMP_SERIAL` | server | Optional single-pump filter |
 | `USER_CONFIG_PATH` | server | Optional JSON/YAML path for `bg_targets` |
-| `CRON_SECRET` | cron only | Bearer token for `/api/meal_rise_cron` (Vercel Cron injects `Authorization`) |
+| `CRON_SECRET` | cron only | Bearer token for `/api/meal_rise_cron` (set this in your external scheduler auth header) |
 | `DEXCOM_USERNAME` / `DEXCOM_PASSWORD` | cron only | Dexcom Share credentials for live CGM poll |
 | `DEXCOM_OUS` | cron only | `true` for non-US Dexcom accounts |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | cron only | Missed-meal alert delivery |
@@ -49,7 +49,7 @@ BG targets default to `config/bg-targets.json` (synced from repo `config/user_co
 
 ### Meal-rise cron (M1)
 
-Vercel Cron runs every five minutes (`vercel.json` → `/api/meal_rise_cron`). The Python serverless handler calls `apps/personal/cron/detect_meal_rise.run_cron()` with monorepo `includeFiles` for `core/`, `detection/`, and `config/`.
+An external scheduler (for example cron-job.org) should call `/api/meal_rise_cron` every five minutes. The Python serverless handler calls `apps/personal/cron/detect_meal_rise.run_cron()` with monorepo `includeFiles` for `core/`, `detection/`, and `config/`.
 
 Manual check (after deploy):
 
