@@ -6,10 +6,11 @@ Relocated the meal-rise Vercel Python function to the **repository root** so the
 
 ## Changes
 
-- **Handler:** `api/meal_rise_cron.py` at repo root (`class handler(BaseHTTPRequestHandler)`).
-- **Config:** repo-root `vercel.json` with `installCommand` → `apps/cron_worker/requirements.txt`, `functions.api/**/*.py`, `excludeFiles` includes `apps/web/**`.
+- **Handler:** `api/index.py` at repo root (`class handler(BaseHTTPRequestHandler)`); `/api/meal_rise_cron` rewritten to `/api/index`.
+- **Config:** repo-root `vercel.json` with `"framework": null` (forces the "Other"/Python builder, overriding the dashboard Framework Preset — fixes "Unmatched Function Pattern"), `installCommand` → `apps/cron_worker/requirements.txt`, `functions.api/**/*.py`, `excludeFiles` includes `apps/web/**`, and a `/api/meal_rise_cron` → `/api/index` rewrite.
+- **Entrypoint:** `[tool.vercel] entrypoint = "api.index:handler"` in root `pyproject.toml`.
 - **Removed:** `apps/cron_worker/api/meal_rise_cron.py`, `apps/cron_worker/vercel.json`.
-- **Tests:** `tests/apps/test_cron_worker_deploy_contract.py` (deploy + frontend isolation contracts); handler tests load `api/meal_rise_cron.py`.
+- **Tests:** `tests/apps/test_cron_worker_deploy_contract.py` (deploy + frontend isolation contracts, incl. framework pin); handler tests load `api/index.py`.
 - **Docs:** `apps/cron_worker/README.md`, `apps/web/README.md` (docs only under web).
 
 ## Vercel dashboard (manual)

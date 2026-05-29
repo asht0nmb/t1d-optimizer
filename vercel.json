@@ -1,6 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
   "installCommand": "pip install -r apps/cron_worker/requirements.txt",
+  "rewrites": [
+    {
+      "source": "/api/meal_rise_cron",
+      "destination": "/api/index"
+    }
+  ],
   "functions": {
     "api/**/*.py": {
       "maxDuration": 60,

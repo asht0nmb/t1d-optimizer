@@ -10,7 +10,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_CRON_MODULE_PATH = _REPO_ROOT / "api" / "meal_rise_cron.py"
+_CRON_MODULE_PATH = _REPO_ROOT / "api" / "index.py"
 _spec = importlib.util.spec_from_file_location("meal_rise_cron", _CRON_MODULE_PATH)
 assert _spec and _spec.loader
 meal_rise_cron = importlib.util.module_from_spec(_spec)

@@ -39,3 +39,6 @@ local = [
     "plotly>=6.0.0",
     "streamlit>=1.44.0",
 ]
+
+[tool.vercel]
+entrypoint = "api.index:handler"
