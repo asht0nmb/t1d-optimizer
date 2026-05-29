@@ -1,8 +1,9 @@
-name: Meal Rise Cron
+# Manual-only fallback. Production schedule uses cron-job.org -> Vercel Python worker
+# (apps/cron_worker). See apps/cron_worker/README.md.
+
+name: Meal Rise Cron (manual)
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:

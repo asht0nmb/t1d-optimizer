@@ -49,31 +49,23 @@ BG targets default to `config/bg-targets.json` (synced from repo `config/user_co
 
 ### Meal-rise cron (M1)
 
-Production meal-rise execution runs outside the Next.js web deployment using GitHub Actions workflow `.github/workflows/meal-rise-cron.yml` on a 5-minute schedule. The web route `/api/cron/meal-rise` is an authenticated health endpoint only.
+- **Scheduler:** [cron-job.org](https://cron-job.org) every 5 minutes.
+- **Execution:** separate Vercel project — Root Directory `apps/cron_worker`, endpoint `/api/meal_rise_cron`. See [`apps/cron_worker/README.md`](../cron_worker/README.md).
+- **This app:** `/api/cron/meal-rise` is an authenticated **health** endpoint only (`mode: health_only`).
 
-Manual check (after deploy):
+Health check (this Next.js deployment):
 
 ```bash
 curl -s -H "Authorization: Bearer $CRON_SECRET" https://YOUR_APP.vercel.app/api/cron/meal-rise
 ```
-Confirm the response includes `"mode":"health_only"`.
 
-Scheduler runbook:
+Worker check (cron-job.org target URL):
 
-1. In GitHub repo settings, set workflow secrets:
-   - `SUPABASE_DB_URL`
-   - `DEXCOM_USERNAME`, `DEXCOM_PASSWORD`, optional `DEXCOM_OUS`
-   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-   - optional `USER_CONFIG_PATH`
-2. Run the workflow manually once (`Actions -> Meal Rise Cron -> Run workflow`).
-3. Confirm logs include either:
-   - `No fast rise detected; exiting cleanly.` or
-   - `Alert handled ...`
-4. Confirm `detection_results` rows appear in Supabase with `kind="meal_rise"` and payload keys:
-   - `event_ref`
-   - `delivery_stage` (`initial` or `retry`)
-   - `delivery_attempt`
-   - `telegram_sent`
+```bash
+curl -s -H "Authorization: Bearer $CRON_SECRET" https://YOUR_WORKER.vercel.app/api/meal_rise_cron
+```
+
+Optional manual run without HTTP: GitHub Actions workflow `Meal Rise Cron (manual)` (`workflow_dispatch` only).
 
 ## Pages (Phase A)
 

@@ -1,7 +1,7 @@
-"""Vercel Python cron entry for live missed-meal (fast-rise) alerting.
+"""Vercel Python webhook for meal-rise cron (cron-job.org trigger).
 
-Invoked every five minutes by Vercel Cron (see apps/web/vercel.json).
-Requires CRON_SECRET via Authorization: Bearer <secret>.
+Deploy with Vercel Root Directory: apps/cron_worker.
+Requires Authorization: Bearer <CRON_SECRET>.
 """
 
 from __future__ import annotations
@@ -33,6 +33,14 @@ def _verify_authorization(headers: dict[str, str]) -> bool:
     return auth == f"Bearer {secret}"
 
 
+def _response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "statusCode": status_code,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(body),
+    }
+
+
 def handler(request: Any) -> dict[str, Any]:
     """Vercel serverless entrypoint."""
     headers = getattr(request, "headers", None) or {}
@@ -49,14 +57,7 @@ def handler(request: Any) -> dict[str, Any]:
     try:
         exit_code = run_cron()
     except Exception as exc:  # pragma: no cover - defensive serverless guard
-        return {
-            "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"error": "cron_execution_failed", "detail": str(exc)}),
-        }
+        return _response(500, {"error": "cron_execution_failed", "detail": str(exc)})
 
-    return {
-        "statusCode": 200 if exit_code == 0 else 500,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"exit_code": exit_code}),
-    }
+    status = 200 if exit_code == 0 else 500
+    return _response(status, {"ok": exit_code == 0, "exit_code": exit_code})

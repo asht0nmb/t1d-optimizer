@@ -27,11 +27,10 @@ describe("GET /api/cron/meal-rise", () => {
     });
     const response = await GET(request);
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      ok: true,
-      mode: "health_only",
-      scheduler: "external",
-      message: "Meal-rise cron execution runs outside the Next.js web deployment.",
-    });
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.mode).toBe("health_only");
+    expect(body.scheduler).toBe("cron-job.org");
+    expect(body.executionEndpoint).toBe("/api/meal_rise_cron");
   });
 });

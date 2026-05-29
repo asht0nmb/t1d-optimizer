@@ -12,7 +12,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_CRON_MODULE_PATH = _REPO_ROOT / "apps" / "web" / "api" / "meal_rise_cron.py"
+_CRON_MODULE_PATH = _REPO_ROOT / "apps" / "cron_worker" / "api" / "meal_rise_cron.py"
 _spec = importlib.util.spec_from_file_location("meal_rise_cron", _CRON_MODULE_PATH)
 assert _spec and _spec.loader
 meal_rise_cron = importlib.util.module_from_spec(_spec)
@@ -44,6 +44,7 @@ def test_handler_accepts_valid_bearer(monkeypatch):
     assert out["statusCode"] == 200
     body = json.loads(out["body"])
     assert body["exit_code"] == 0
+    assert body["ok"] is True
 
 
 def test_handler_returns_500_for_nonzero_exit(monkeypatch):
