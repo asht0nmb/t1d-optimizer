@@ -50,7 +50,7 @@ BG targets default to `config/bg-targets.json` (synced from repo `config/user_co
 ### Meal-rise cron (M1)
 
 - **Scheduler:** [cron-job.org](https://cron-job.org) every 5 minutes.
-- **Execution:** separate Vercel project — Root Directory `apps/cron_worker`, endpoint `/api/meal_rise_cron`. See [`apps/cron_worker/README.md`](../cron_worker/README.md).
+- **Execution:** separate Vercel project — Root Directory **repository root** (`.`), endpoint `/api/meal_rise_cron`. See [`apps/cron_worker/README.md`](../cron_worker/README.md). This Next.js project stays on Root Directory `apps/web` only.
 - **This app:** `/api/cron/meal-rise` is an authenticated **health** endpoint only (`mode: health_only`).
 
 Health check (this Next.js deployment):
@@ -100,9 +100,11 @@ npm run test     # vitest — TIR, dates, API helpers, cron auth
 
 ## Vercel deploy
 
-1. Import repo; set **Root Directory** to `apps/web`.
+1. Import repo; set **Root Directory** to `apps/web` (not repository root).
 2. Add the same env vars as `.env.example` in Project Settings.
 3. Deploy. Ensure Auth redirect URLs include `https://YOUR_APP.vercel.app/auth/callback`.
+
+The meal-rise **worker** is a second Vercel project (Root Directory `.`, Framework **Other**). Repo-root `vercel.json` and `api/` apply only to that project — this dashboard build does not use them.
 
 ## Security checklist
 

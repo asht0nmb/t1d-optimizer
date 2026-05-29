@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "pip install -r apps/cron_worker/requirements.txt",
+  "functions": {
+    "api/**/*.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{apps/web/**,node_modules/**,tests/**,docs/**,data/**,test_data/**,research/**,.venv/**,**/*.parquet,**/*.csv}"
+    }
+  }
+}

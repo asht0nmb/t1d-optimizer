@@ -1,75 +1,81 @@
-"""Tests for the Vercel Python cron entry (auth only)."""
+"""Tests for the Vercel Python cron entry (auth + response mapping)."""
 
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_CRON_MODULE_PATH = _REPO_ROOT / "apps" / "cron_worker" / "api" / "meal_rise_cron.py"
+_CRON_MODULE_PATH = _REPO_ROOT / "api" / "meal_rise_cron.py"
 _spec = importlib.util.spec_from_file_location("meal_rise_cron", _CRON_MODULE_PATH)
 assert _spec and _spec.loader
 meal_rise_cron = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(meal_rise_cron)
 
 
-def test_handler_rejects_missing_auth(monkeypatch):
+def test_handler_class_is_base_http_request_handler():
+    from http.server import BaseHTTPRequestHandler
+
+    assert issubclass(meal_rise_cron.handler, BaseHTTPRequestHandler)
+
+
+def test_handle_cron_request_rejects_missing_auth(monkeypatch):
     monkeypatch.delenv("CRON_SECRET", raising=False)
-    req = SimpleNamespace(headers={})
-    out = meal_rise_cron.handler(req)
-    assert out["statusCode"] == 401
+    status, body = meal_rise_cron.handle_cron_request({})
+    assert status == 401
+    assert body == {"error": "unauthorized"}
 
 
-def test_handler_rejects_wrong_bearer(monkeypatch):
+def test_handle_cron_request_rejects_wrong_bearer(monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "expected")
-    req = SimpleNamespace(headers={"authorization": "Bearer wrong"})
-    out = meal_rise_cron.handler(req)
-    assert out["statusCode"] == 401
+    status, body = meal_rise_cron.handle_cron_request(
+        {"authorization": "Bearer wrong"}
+    )
+    assert status == 401
+    assert body == {"error": "unauthorized"}
 
 
-def test_handler_accepts_valid_bearer(monkeypatch):
+def test_handle_cron_request_accepts_valid_bearer(monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "expected")
     monkeypatch.setattr(
         "apps.personal.cron.detect_meal_rise.run_cron",
         lambda: 0,
     )
-    req = SimpleNamespace(headers={"Authorization": "Bearer expected"})
-    out = meal_rise_cron.handler(req)
-    assert out["statusCode"] == 200
-    body = json.loads(out["body"])
+    status, body = meal_rise_cron.handle_cron_request(
+        {"Authorization": "Bearer expected"}
+    )
+    assert status == 200
     assert body["exit_code"] == 0
     assert body["ok"] is True
 
 
-def test_handler_returns_500_for_nonzero_exit(monkeypatch):
+def test_handle_cron_request_returns_500_for_nonzero_exit(monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "expected")
     monkeypatch.setattr(
         "apps.personal.cron.detect_meal_rise.run_cron",
         lambda: 2,
     )
-    req = SimpleNamespace(headers={"Authorization": "Bearer expected"})
-    out = meal_rise_cron.handler(req)
-    assert out["statusCode"] == 500
-    body = json.loads(out["body"])
+    status, body = meal_rise_cron.handle_cron_request(
+        {"Authorization": "Bearer expected"}
+    )
+    assert status == 500
     assert body["exit_code"] == 2
 
 
-def test_handler_returns_500_when_run_cron_raises(monkeypatch):
+def test_handle_cron_request_returns_500_when_run_cron_raises(monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "expected")
 
     def _boom() -> int:
         raise RuntimeError("boom")
 
     monkeypatch.setattr("apps.personal.cron.detect_meal_rise.run_cron", _boom)
-    req = SimpleNamespace(headers={"Authorization": "Bearer expected"})
-    out = meal_rise_cron.handler(req)
-    assert out["statusCode"] == 500
-    body = json.loads(out["body"])
+    status, body = meal_rise_cron.handle_cron_request(
+        {"Authorization": "Bearer expected"}
+    )
+    assert status == 500
     assert body["error"] == "cron_execution_failed"
     assert "boom" in body["detail"]
