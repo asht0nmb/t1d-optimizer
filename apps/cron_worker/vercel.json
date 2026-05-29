@@ -3,13 +3,7 @@
   "functions": {
     "api/meal_rise_cron.py": {
       "maxDuration": 60,
-      "includeFiles": [
-        "../../core/**",
-        "../../detection/**",
-        "../../config/**",
-        "../../apps/personal/**",
-        "../../apps/__init__.py"
-      ]
+      "includeFiles": "../../{core,detection,config,apps}/**"
     }
   }
 }
