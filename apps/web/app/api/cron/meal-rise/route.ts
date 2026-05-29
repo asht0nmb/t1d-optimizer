@@ -12,7 +12,10 @@ export async function GET(request: Request) {
   return jsonOk({
     ok: true,
     mode: "health_only",
-    scheduler: "external",
-    message: "Meal-rise cron execution runs outside the Next.js web deployment.",
+    scheduler: "cron-job.org",
+    executionEndpoint: "/api/meal_rise_cron",
+    executionProject: "apps/cron_worker (separate Vercel project)",
+    message:
+      "Point cron-job.org at the cron_worker Vercel URL. See apps/cron_worker/README.md.",
   });
 }
