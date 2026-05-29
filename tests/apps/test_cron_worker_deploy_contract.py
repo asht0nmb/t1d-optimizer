@@ -10,14 +10,15 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_HANDLER_PATH = _REPO_ROOT / "api" / "meal_rise_cron.py"
+_HANDLER_PATH = _REPO_ROOT / "api" / "index.py"
 _ROOT_VERCEL = _REPO_ROOT / "vercel.json"
 _WEB_VERCEL = _REPO_ROOT / "apps" / "web" / "vercel.json"
 _LEGACY_HANDLER = _REPO_ROOT / "apps" / "cron_worker" / "api" / "meal_rise_cron.py"
 _WEB_HANDLER = _REPO_ROOT / "apps" / "web" / "api" / "meal_rise_cron.py"
+_NON_STANDARD_HANDLER = _REPO_ROOT / "api" / "meal_rise_cron.py"
 
 
-def _load_meal_rise_cron_module():
+def _load_cron_handler_module():
     spec = importlib.util.spec_from_file_location("meal_rise_cron_contract", _HANDLER_PATH)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -25,9 +26,10 @@ def _load_meal_rise_cron_module():
     return module
 
 
-def test_api_meal_rise_cron_exists_at_repo_root():
+def test_api_index_exists_at_repo_root():
     assert _HANDLER_PATH.is_file()
     assert not _LEGACY_HANDLER.is_file()
+    assert not _NON_STANDARD_HANDLER.is_file()
 
 
 def test_root_vercel_json_functions_pattern_matches_handler():
@@ -38,17 +40,43 @@ def test_root_vercel_json_functions_pattern_matches_handler():
     assert api_py_files, "expected at least one api/**/*.py file"
 
 
-def test_meal_rise_cron_exports_handler_class():
-    module = _load_meal_rise_cron_module()
+def test_root_vercel_json_rewrites_meal_rise_cron_to_index():
+    config = json.loads(_ROOT_VERCEL.read_text(encoding="utf-8"))
+    rewrites = config.get("rewrites", [])
+    assert any(
+        r.get("source") == "/api/meal_rise_cron" and r.get("destination") == "/api/index"
+        for r in rewrites
+    )
+
+
+def test_pyproject_declares_vercel_entrypoint():
+    text = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert '[tool.vercel]' in text
+    assert 'entrypoint = "api.index:handler"' in text
+
+
+def test_root_vercel_json_pins_framework_to_other():
+    # "Unmatched Function Pattern" surfaces when Vercel builds this repo with a
+    # Next.js framework context: the Python `functions` globs are then never
+    # matched. Pinning the framework to "Other" (JSON null) in vercel.json
+    # overrides the dashboard Framework Preset and forces the Python builder,
+    # so the worker deploy no longer depends on a manual dashboard setting.
+    config = json.loads(_ROOT_VERCEL.read_text(encoding="utf-8"))
+    assert "framework" in config, "vercel.json must pin a framework"
+    assert config["framework"] is None, "framework must be null (= 'Other')"
+
+
+def test_cron_handler_exports_handler_class():
+    module = _load_cron_handler_module()
     assert isinstance(module.handler, type)
     assert issubclass(module.handler, BaseHTTPRequestHandler)
     assert not isinstance(module.handler, types.FunctionType)
 
 
-def test_meal_rise_cron_repo_root_on_sys_path():
+def test_cron_handler_repo_root_on_sys_path():
     repo_root = str(_REPO_ROOT)
     sys.path[:] = [p for p in sys.path if p != repo_root]
-    module = _load_meal_rise_cron_module()
+    module = _load_cron_handler_module()
     assert repo_root in sys.path
     assert module._REPO_ROOT == _REPO_ROOT
 

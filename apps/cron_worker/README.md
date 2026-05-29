@@ -11,9 +11,9 @@ The Next.js app (`apps/web`) only exposes `/api/cron/meal-rise` as an authentica
 Create a **new** Vercel project (do not reuse the Next.js `apps/web` project).
 
 1. Import the same GitHub repo in Vercel.
-2. Set **Root Directory** to **`.`** (repository root). Do not use `apps/cron_worker` — the handler lives at `api/meal_rise_cron.py` and config at repo-root `vercel.json`.
-3. Set **Framework Preset** to **Other** — not Next.js. If Framework is Next.js, `vercel.json` `functions` patterns will not match Python files in `api/` and you get “Unmatched function pattern”.
-4. Confirm [`api/meal_rise_cron.py`](../../api/meal_rise_cron.py) exports `class handler(BaseHTTPRequestHandler)` (required by Vercel Python runtime).
+2. Set **Root Directory** to **`.`** (repository root). Do not use `apps/cron_worker` — the handler lives at `api/index.py` and config at repo-root `vercel.json`.
+3. **Framework Preset** is pinned to **Other** declaratively via `"framework": null` in repo-root [`vercel.json`](../../vercel.json), which overrides the dashboard setting — so you no longer need to set it by hand. (Background: if the project builds with a Next.js framework context, `vercel.json` `functions` patterns never match the Python files in `api/` and the deploy fails with “Unmatched function pattern”. The `vercel.json` pin prevents that.) Leaving the dashboard Framework Preset on **Other** as well is a harmless belt-and-suspenders.
+4. Confirm [`api/index.py`](../../api/index.py) exports `class handler(BaseHTTPRequestHandler)` (Vercel auto-discovers standard `api/index.py` entrypoints).
 5. Repo-root [`vercel.json`](../../vercel.json) uses glob `api/**/*.py`. Do not add Python `functions` entries to [`apps/web/vercel.json`](../web/vercel.json).
 6. Add environment variables:
 
@@ -31,8 +31,10 @@ Create a **new** Vercel project (do not reuse the Next.js `apps/web` project).
 ### If deploy still fails with “Unmatched function pattern”
 
 - You are on the **worker** project (Root Directory **`.`**), not the dashboard project (`apps/web`).
-- Framework Preset is **Other**.
-- Latest `main` includes `class handler(BaseHTTPRequestHandler)` in `api/meal_rise_cron.py`.
+- Repo-root `vercel.json` includes `"framework": null` (forces the "Other"/Python builder regardless of the dashboard Framework Preset). This is the usual fix for this error.
+- Latest `main` includes `class handler(BaseHTTPRequestHandler)` in `api/index.py`.
+- `pyproject.toml` has `[tool.vercel] entrypoint = "api.index:handler"` as a fallback.
+- `/api/meal_rise_cron` is rewritten to `/api/index` in repo-root `vercel.json` (cron-job.org URL unchanged).
 - Temporarily trim repo-root `vercel.json` to only `$schema` + `installCommand` to confirm the function is detected, then re-add `api/**/*.py` + `maxDuration`.
 
 ### CLI

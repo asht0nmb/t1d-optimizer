@@ -3,8 +3,8 @@
 Deploy with Vercel Root Directory: repository root (.).
 Requires Authorization: Bearer <CRON_SECRET>.
 
-Vercel discovers this file as a Serverless Function when it exports
-``class handler(BaseHTTPRequestHandler)`` (not a plain ``def handler``).
+Vercel auto-discovers ``api/index.py`` with ``class handler(BaseHTTPRequestHandler)``.
+Legacy URL ``/api/meal_rise_cron`` is rewritten to this function in vercel.json.
 """
 
 from __future__ import annotations
