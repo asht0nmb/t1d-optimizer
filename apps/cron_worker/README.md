@@ -6,10 +6,14 @@ The Next.js app (`apps/web`) only exposes `/api/cron/meal-rise` as an authentica
 
 ## Vercel setup (second project)
 
+Create a **new** Vercel project (do not reuse the Next.js `apps/web` project).
+
 1. Import the same GitHub repo in Vercel.
-2. Set **Root Directory** to `apps/cron_worker`.
-3. Framework preset: **Other** (Python serverless `api/` routes).
-4. Add environment variables:
+2. Set **Root Directory** to `apps/cron_worker` (type it manually if the folder picker does not show it).
+3. Set **Framework Preset** to **Other** — not Next.js. If Framework is Next.js, `vercel.json` `functions` patterns will not match Python files in `api/` and you get “Unmatched function pattern”.
+4. Confirm `apps/cron_worker/api/meal_rise_cron.py` exports `class handler(BaseHTTPRequestHandler)` (required by Vercel Python runtime).
+5. `vercel.json` uses glob `api/**/*.py` (not `api/meal_rise_cron.py` alone). Do not add Python `functions` entries to `apps/web/vercel.json`.
+6. Add environment variables:
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
@@ -20,7 +24,14 @@ The Next.js app (`apps/web`) only exposes `/api/cron/meal-rise` as an authentica
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | yes | Alert delivery |
 | `USER_CONFIG_PATH` | optional | Override path to `user_config.yaml` (default: repo `config/user_config.yaml`) |
 
-5. Deploy. Note the production URL, e.g. `https://t1d-meal-rise-worker.vercel.app`.
+7. Deploy. Note the production URL, e.g. `https://t1d-meal-rise-worker.vercel.app`.
+
+### If deploy still fails with “Unmatched function pattern”
+
+- You are on the **worker** project (Root Directory `apps/cron_worker`), not the dashboard project.
+- Framework Preset is **Other**.
+- Latest `main` includes `class handler(BaseHTTPRequestHandler)` in `api/meal_rise_cron.py`.
+- Temporarily try minimal `vercel.json` (only `$schema`) to confirm the function is detected, then re-add `api/**/*.py` + `maxDuration`.
 
 ## cron-job.org
 
