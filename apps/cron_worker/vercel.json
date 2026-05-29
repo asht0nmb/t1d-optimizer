@@ -1,9 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "pip install -r requirements.txt",
   "functions": {
-    "api/meal_rise_cron.py": {
-      "maxDuration": 60,
-      "includeFiles": "../../{core,detection,config,apps}/**"
+    "api/**/*.py": {
+      "maxDuration": 60
     }
   }
 }
