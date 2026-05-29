@@ -2,17 +2,19 @@
 
 Dedicated Vercel project for **cron-job.org** to trigger meal-rise detection every 5 minutes.
 
-The Next.js app (`apps/web`) only exposes `/api/cron/meal-rise` as an authenticated **health** endpoint. Real execution happens here at `/api/meal_rise_cron`.
+The Next.js app (`apps/web`) only exposes `/api/cron/meal-rise` as an authenticated **health** endpoint. Real execution happens on this worker at `/api/meal_rise_cron`.
+
+**Do not confuse with the dashboard project:** the frontend Vercel project uses Root Directory `apps/web` and never reads repo-root `vercel.json` or `api/`.
 
 ## Vercel setup (second project)
 
 Create a **new** Vercel project (do not reuse the Next.js `apps/web` project).
 
 1. Import the same GitHub repo in Vercel.
-2. Set **Root Directory** to `apps/cron_worker` (type it manually if the folder picker does not show it).
+2. Set **Root Directory** to **`.`** (repository root). Do not use `apps/cron_worker` — the handler lives at `api/meal_rise_cron.py` and config at repo-root `vercel.json`.
 3. Set **Framework Preset** to **Other** — not Next.js. If Framework is Next.js, `vercel.json` `functions` patterns will not match Python files in `api/` and you get “Unmatched function pattern”.
-4. Confirm `apps/cron_worker/api/meal_rise_cron.py` exports `class handler(BaseHTTPRequestHandler)` (required by Vercel Python runtime).
-5. `vercel.json` uses glob `api/**/*.py` (not `api/meal_rise_cron.py` alone). Do not add Python `functions` entries to `apps/web/vercel.json`.
+4. Confirm [`api/meal_rise_cron.py`](../../api/meal_rise_cron.py) exports `class handler(BaseHTTPRequestHandler)` (required by Vercel Python runtime).
+5. Repo-root [`vercel.json`](../../vercel.json) uses glob `api/**/*.py`. Do not add Python `functions` entries to [`apps/web/vercel.json`](../web/vercel.json).
 6. Add environment variables:
 
 | Variable | Required | Purpose |
@@ -28,16 +30,26 @@ Create a **new** Vercel project (do not reuse the Next.js `apps/web` project).
 
 ### If deploy still fails with “Unmatched function pattern”
 
-- You are on the **worker** project (Root Directory `apps/cron_worker`), not the dashboard project.
+- You are on the **worker** project (Root Directory **`.`**), not the dashboard project (`apps/web`).
 - Framework Preset is **Other**.
 - Latest `main` includes `class handler(BaseHTTPRequestHandler)` in `api/meal_rise_cron.py`.
-- Temporarily try minimal `vercel.json` (only `$schema`) to confirm the function is detected, then re-add `api/**/*.py` + `maxDuration`.
+- Temporarily trim repo-root `vercel.json` to only `$schema` + `installCommand` to confirm the function is detected, then re-add `api/**/*.py` + `maxDuration`.
+
+### CLI
+
+Link the worker project from the repository root:
+
+```bash
+cd /path/to/t1d-engine
+vercel link   # select the worker project, not apps/web
+vercel build
+```
 
 ## cron-job.org
 
 - **URL:** `https://<worker-project>.vercel.app/api/meal_rise_cron`
 - **Schedule:** every 5 minutes
-- **Method:** GET (or POST; handler accepts Vercel invocation)
+- **Method:** GET (or POST; handler accepts both)
 - **Headers:** `Authorization: Bearer <CRON_SECRET>`
 - **Timeout:** align with Vercel function max (60s on Hobby configurable limit)
 
@@ -63,3 +75,13 @@ export SUPABASE_DB_URL=...
 # ... other vars ...
 uv run python -m apps.personal.cron.detect_meal_rise
 ```
+
+## Files in this directory
+
+| File | Purpose |
+|------|---------|
+| `requirements.txt` | Python deps for Vercel `installCommand` |
+| `pyproject.toml` | Local/metadata mirror of worker deps |
+| `README.md` | This deploy guide |
+
+Handler and `vercel.json` live at the **repository root** (`api/`, `vercel.json`).
