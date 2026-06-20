@@ -5,7 +5,16 @@ Fetches new pump events from tconnectsync, runs the full enrichment layer
 Fetch-state bookmarks live in Postgres (``fetch_state``), not on disk.
 
 Usage:
-    uv run python scripts/sync_tandem_to_supabase.py [--dry-run] [--only SERIAL] [-v]
+    uv run python scripts/sync_tandem_to_supabase.py
+        [--dry-run] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--only SERIAL] [-v]
+
+By default the window is the ``fetch_state`` bookmark → the pump's latest event
+date; with no bookmark it is the pump's full history. Pass ``--start`` to bound
+the sync to a gap (e.g. the last-known date) without re-pulling history — this
+also makes ``--dry-run`` preview that window, since dry-run never opens the DB
+to read the bookmark. A successful (non-dry) run seeds ``fetch_state`` so later
+runs resume incrementally on their own. Upserts are ``ON CONFLICT DO NOTHING``,
+so an overlapping start day is harmless.
 
 Environment:
     TCONNECT_EMAIL, TCONNECT_PASSWORD — Tandem source API (required).
@@ -77,25 +86,57 @@ def _connect_storage() -> tuple[SupabaseStorage, Any]:
             "`uv add psycopg2-binary`."
         ) from exc
 
-    conn = psycopg2.connect(db_url, connect_timeout=10)
+    conn = psycopg2.connect(
+        db_url,
+        connect_timeout=10,
+        # TCP keepalives guard against network-level drops of an idle
+        # connection during a long tconnectsync fetch.
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+    # Autocommit so read-only helpers (e.g. get_fetch_state, which does not
+    # commit) never leave the connection idle-in-transaction across the
+    # multi-minute fetch between reading a pump's bookmark and upserting its
+    # rows. That state tripped idle_in_transaction_session_timeout='5min'
+    # (migration 0002) and dropped the SSL connection mid-sync. upsert_table's
+    # per-chunk commit() calls become harmless no-ops under autocommit, and
+    # row durability is unchanged (it already committed per chunk).
+    conn.autocommit = True
     return SupabaseStorage(conn=conn), conn
 
 
 def compute_fetch_window(
     pump: dict[str, Any],
     fetch_state: FetchState | None,
+    *,
+    start_override: str | None = None,
+    end_override: str | None = None,
 ) -> tuple[str, str]:
-    """Return ``(start_date, end_date)`` ISO strings for one pump."""
-    max_date = pump["maxDateWithEvents"][:10]
+    """Return ``(start_date, end_date)`` ISO strings for one pump.
+
+    ``start_override`` / ``end_override`` (``--start`` / ``--end``) take
+    precedence over both the pump's full range and the ``fetch_state``
+    bookmark. This is the gap-fill path: it lets a caller sync only a bounded
+    window (e.g. last-known-date → today) without re-pulling full history, and
+    it makes ``--dry-run`` preview that same window even though dry-run never
+    opens the DB to read the bookmark.
+    """
+    end = end_override if end_override is not None else pump["maxDateWithEvents"][:10]
+
+    if start_override is not None:
+        return start_override, end
+
     if fetch_state is None:
-        return pump["minDateWithEvents"][:10], max_date
+        return pump["minDateWithEvents"][:10], end
 
     last_end = fetch_state.payload.get("last_successful_chunk_end")
     if last_end is None:
-        return pump["minDateWithEvents"][:10], max_date
+        return pump["minDateWithEvents"][:10], end
 
     start = (date.fromisoformat(str(last_end)) - timedelta(days=1)).isoformat()
-    return start, max_date
+    return start, end
 
 
 def _collect_timestamp_bounds(dfs: dict[str, pd.DataFrame]) -> tuple[str | None, str | None]:
@@ -130,6 +171,8 @@ def process_pump(
     *,
     dry_run: bool,
     verbose: bool,
+    start_override: str | None = None,
+    end_override: str | None = None,
 ) -> bool:
     """Fetch, enrich, and upsert one pump. Returns True when events were processed."""
     serial = str(pump["serialNumber"])
@@ -137,7 +180,12 @@ def process_pump(
     serial_log = _mask_serial(serial)
 
     fetch_state = None if storage is None else storage.get_fetch_state(serial)
-    start, end = compute_fetch_window(pump, fetch_state)
+    start, end = compute_fetch_window(
+        pump,
+        fetch_state,
+        start_override=start_override,
+        end_override=end_override,
+    )
 
     if verbose:
         logger.info(
@@ -213,6 +261,8 @@ def run_sync(
     dry_run: bool = False,
     only_serial: str | None = None,
     verbose: bool = False,
+    start: str | None = None,
+    end: str | None = None,
 ) -> int:
     """Orchestrate incremental sync for all (or one) pump(s)."""
     _check_tconnect_env()
@@ -257,6 +307,8 @@ def run_sync(
                 config,
                 dry_run=dry_run,
                 verbose=verbose,
+                start_override=start,
+                end_override=end,
             ):
                 processed_any = True
 
@@ -274,6 +326,17 @@ def run_sync(
     return 0
 
 
+def _iso_date(value: str) -> str:
+    """argparse type: accept only YYYY-MM-DD; return it unchanged."""
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected an ISO date (YYYY-MM-DD), got {value!r}"
+        )
+    return value
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Incremental Tandem ingestion into Supabase (enriched upsert)."
@@ -282,6 +345,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Run fetch + enriched build_all; log row counts; skip DB writes.",
+    )
+    parser.add_argument(
+        "--start",
+        type=_iso_date,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Override the fetch window start. Bounds the sync to a gap "
+        "(e.g. last-known-date) instead of re-pulling full history; also "
+        "makes --dry-run preview this window. Upserts are idempotent, so a "
+        "day of overlap is harmless.",
+    )
+    parser.add_argument(
+        "--end",
+        type=_iso_date,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Override the fetch window end (default: pump's latest event date).",
     )
     parser.add_argument(
         "--only",
@@ -311,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         only_serial=args.only_serial,
         verbose=args.verbose,
+        start=args.start,
+        end=args.end,
     )
 
 

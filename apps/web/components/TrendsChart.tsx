@@ -10,24 +10,50 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { useRouter } from "next/navigation";
 import type { TrendsResponse } from "@/lib/types/api";
 import { colors } from "@/lib/colors";
 
+interface TrendRow {
+  date: string; // full YYYY-MM-DD, for navigation
+  label: string; // short MM-DD, for the axis
+  inRange: number;
+  below: number;
+  above: number;
+}
+
 export function TrendsChart({ data }: { data: TrendsResponse }) {
-  const rows = data.points.map((p) => ({
-    date: p.date.slice(5),
+  const router = useRouter();
+  const rows: TrendRow[] = data.points.map((p) => ({
+    date: p.date,
+    label: p.date.slice(5),
     inRange: p.in_range_pct,
     below: p.below_pct,
     above: p.above_pct,
   }));
 
+  const goToDay = (state: unknown) => {
+    const payload = (state as {
+      activePayload?: Array<{ payload?: TrendRow }>;
+    })?.activePayload;
+    const date = payload?.[0]?.payload?.date;
+    if (date) router.push(`/day/${date}`);
+  };
+
   return (
     <ResponsiveContainer width="100%" height={360}>
-      <AreaChart data={rows}>
+      <AreaChart
+        data={rows}
+        onClick={goToDay}
+        style={{ cursor: "pointer" }}
+      >
         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-        <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+        <XAxis dataKey="label" tick={{ fontSize: 11 }} />
         <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} unit="%" />
         <Tooltip
+          labelFormatter={(_, payload) =>
+            payload?.[0]?.payload?.date ?? ""
+          }
           formatter={(v) =>
             typeof v === "number" ? `${v.toFixed(1)}%` : String(v ?? "")
           }

@@ -26,6 +26,17 @@ describe("verifyCronAuth", () => {
     expect(verifyCronAuth(req)).toBe(true);
   });
 
+  it("rejects a token of a different length without throwing", () => {
+    // timingSafeEqual throws on length mismatch; the length guard must
+    // short-circuit so this returns false rather than raising.
+    process.env.CRON_SECRET = "test-secret";
+    const req = new Request("http://localhost/api/cron/meal-rise", {
+      headers: { authorization: "Bearer x" },
+    });
+    expect(() => verifyCronAuth(req)).not.toThrow();
+    expect(verifyCronAuth(req)).toBe(false);
+  });
+
   it("rejects when CRON_SECRET is unset", () => {
     delete process.env.CRON_SECRET;
     const req = new Request("http://localhost/api/cron/meal-rise", {

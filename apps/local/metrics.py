@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, tzinfo
 
 import pandas as pd
 
 from apps.local.dates import date_window_bounds, iter_dates_in_window
+from core.metrics.cgm_metrics import time_in_range
 
 
 def compute_tir_percent(bg: pd.Series, *, low: float, high: float) -> float:
-    """Percent of readings in ``[low, high]`` (0–100). Empty series → 0."""
-    if bg.empty:
-        return 0.0
-    in_range = (bg >= low) & (bg <= high)
-    return float(in_range.mean() * 100.0)
+    """Percent of readings in ``[low, high]`` (0–100). Empty series → 0.
+
+    Delegates to the shared :func:`core.metrics.cgm_metrics.time_in_range`
+    (the single source of truth for TIR); both return ``0.0`` on empty input.
+    """
+    return time_in_range(bg, low, high)
 
 
 def _cgm_for_calendar_days(
@@ -61,9 +63,16 @@ def cgm_in_read_bounds(
     *,
     end_date: date,
     days: int,
+    tz: tzinfo | None = None,
 ) -> pd.DataFrame:
-    """Filter CGM to the half-open datetime window used by ``read_table``."""
-    since, until = date_window_bounds(end_date, days)
+    """Filter CGM to the half-open datetime window used by ``read_table``.
+
+    ``tz`` defines the day boundaries (midnight). It MUST be the config
+    timezone so the day-view/AGP slice agrees with the calendar-day TIR slice
+    (``_cgm_for_calendar_days``); otherwise the window spans a UTC day while
+    TIR spans the local day. Defaults to UTC for backward compatibility.
+    """
+    since, until = date_window_bounds(end_date, days, tz=tz)
     if cgm.empty:
         return cgm
     ts = pd.to_datetime(cgm["timestamp"])

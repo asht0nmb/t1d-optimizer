@@ -2,8 +2,11 @@ import { fetchHeatmap } from "@/lib/queries/heatmap";
 import { getPumpSerial, getTimezone } from "@/lib/config";
 import { coerceDateParam } from "@/lib/dates";
 import { jsonError, jsonOk } from "@/lib/api/route";
+import { requireSession } from "@/lib/api/auth";
 
 export async function GET(req: Request) {
+  const denied = await requireSession();
+  if (denied) return denied;
   const { searchParams } = new URL(req.url);
   const from = coerceDateParam(searchParams.get("from"));
   const to = coerceDateParam(searchParams.get("to"));

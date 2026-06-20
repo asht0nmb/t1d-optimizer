@@ -32,6 +32,7 @@ class MealRiseConfig:
     fetch_buffer_minutes: int
     expected_interval_minutes: int
     fetch_readings_padding: int
+    max_reading_age_minutes: int = 15
 
 
 @dataclass(frozen=True)

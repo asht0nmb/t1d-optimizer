@@ -27,7 +27,27 @@ from pydexcom import Dexcom, Region
 from core.detection import Anchor, make_window, detect_meal_rise
 from core.detection.meal_rise import MealRiseConfig, MealRiseDetection
 from core.storage.protocol import Storage
-from core.storage.records import AlertRecord, DetectionResult
+from core.storage.records import AlertRecord, DetectionResult, FetchState
+
+# Heartbeat source id for the live meal-rise worker. A fetch_state row under
+# this id is rewritten on every completed cycle so the worker's liveness is
+# observable (the /status page reads it); its absence/staleness signals the
+# loop has stopped, which the "last detection" signal cannot (detections only
+# fire on rises).
+_LIVE_CRON_SOURCE = "live_cron"
+
+
+def _write_live_heartbeat(storage: Any, when: datetime) -> None:
+    """Record a liveness heartbeat for the live meal-rise worker."""
+    storage.set_fetch_state(
+        _LIVE_CRON_SOURCE,
+        FetchState(
+            source_id=_LIVE_CRON_SOURCE,
+            last_cursor=None,
+            last_fetched_at=when,
+            source_kind="pydexcom",
+        ),
+    )
 from detection.config import AppConfig, get_config
 
 MealRiseAlertOutcome = Literal["sent", "suppressed", "failed_config", "partial_success"]
@@ -372,11 +392,17 @@ def handle_detection_alert(
     return "partial_success"
 
 
-def run_cron() -> int:
-    """Run the live missed-meal alerting cron pipeline."""
+def run_cron(*, now: datetime | None = None) -> int:
+    """Run the live missed-meal alerting cron pipeline.
+
+    Args:
+        now: Reference "now" for the freshness guard and retry pass. Defaults
+            to ``datetime.now(timezone.utc)``; injectable for tests.
+    """
     # 1. Load config
     config = get_config()
     tz_name = config.timezone
+    now = now or datetime.now(timezone.utc)
 
     # 2. Connect to storage
     try:
@@ -397,11 +423,13 @@ def run_cron() -> int:
             return False
         return send_telegram_message(bot_token, chat_id, msg)
 
+    failed = False
     try:
         retry_summary = retry_failed_alert_deliveries(
             storage,
             config,
             send_telegram=_send,
+            now=now,
         )
         if retry_summary["retried"] > 0:
             logger.info(
@@ -421,6 +449,19 @@ def run_cron() -> int:
         latest_ts = latest_reading["timestamp"]
         latest_bg = latest_reading["bg_mgdl"]
         logger.info("Latest CGM Reading: %s @ %d mg/dL", latest_ts.isoformat(), latest_bg)
+
+        # 3b. Freshness guard — refuse to act on stale CGM. Dexcom Share can
+        # serve an hours-old window when no sensor session is active; without
+        # this guard the detector could alert on a long-past rise.
+        age_minutes = (now - latest_ts).total_seconds() / 60.0
+        if age_minutes > config.meal_rise.max_reading_age_minutes:
+            logger.warning(
+                "Latest CGM reading is stale (%.1f min old > %d min max); "
+                "skipping detection.",
+                age_minutes,
+                config.meal_rise.max_reading_age_minutes,
+            )
+            return 0
 
         # 4. Construct Anchor and Window
         anchor = Anchor(timestamp=latest_ts, kind="live")
@@ -464,7 +505,27 @@ def run_cron() -> int:
         logger.info("Cron loop completed (outcome=%s).", outcome)
         return 0
 
+    except Exception as e:
+        failed = True
+        logger.exception("Meal-rise cron cycle failed: %s", e)
+        try:
+            _send(
+                f"⚠️ Meal-rise cron worker error: {type(e).__name__}. "
+                "Live missed-meal alerts may be paused until this clears."
+            )
+        except Exception:
+            logger.warning("Failed to send worker-failure alert", exc_info=True)
+        return 1
+
     finally:
+        # Heartbeat on any completed cycle (success or clean no-op exit), but
+        # NOT when the cycle raised — the absence of a fresh heartbeat is the
+        # liveness signal the /status page watches for.
+        if not failed:
+            try:
+                _write_live_heartbeat(storage, now)
+            except Exception:
+                logger.warning("live_cron heartbeat write failed", exc_info=True)
         if conn is not None:
             conn.close()
 

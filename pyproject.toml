@@ -1,12 +1,11 @@
 [project]
 name = "t1d-engine"
 version = "0.1.0"
-description = "Add your description here"
+description = "Type 1 diabetes data intelligence: CGM + pump ingestion, event detection, live alerts, dashboards"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "jupyter>=1.1.1",
-    "lightgbm>=4.6.0",
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",
     "pandas>=3.0.1",
@@ -16,16 +15,12 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0",
     "scikit-learn>=1.8.0",
-    "scipy>=1.17.1",
-    "seaborn>=0.13.2",
     "setuptools<75",
-    "statsmodels>=0.14.6",
     "tconnectsync>=2.3.4",
-    "xgboost>=3.2.0",
 ]
 
 [tool.pytest.ini_options]
-addopts = "-m 'not legacy'"
+addopts = "-m 'not legacy and not integration'"
 markers = [
     "integration: marks tests that hit real API (deselect with '-m \"not integration\"')",
     "legacy: tests for detection/legacy/* reference implementation; not part of the default run",
@@ -33,11 +28,22 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.155.3",
     "pytest>=9.0.2",
 ]
 local = [
     "plotly>=6.0.0",
     "streamlit>=1.44.0",
+]
+# Heavyweight ML/stats stack reserved for the (owner-deferred) ML/LLM layer.
+# Zero imports in production today; sklearn stays mandatory for
+# detection/legacy/clustering.py. Install with `uv sync --group ml`.
+ml = [
+    "lightgbm>=4.6.0",
+    "scipy>=1.17.1",
+    "seaborn>=0.13.2",
+    "statsmodels>=0.14.6",
+    "xgboost>=3.2.0",
 ]
 
 [tool.vercel]

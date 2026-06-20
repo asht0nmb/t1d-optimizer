@@ -30,6 +30,27 @@ export function dayWindowUtc(
   return { since, until };
 }
 
+/**
+ * UTC instant bounds for an inclusive range of local calendar days
+ * [startDay 00:00, endDay+1 00:00) in the given IANA timezone.
+ *
+ * Each edge is resolved against the timezone's offset on its own date, so the
+ * window is correct across DST transitions. Use these instants as timestamptz
+ * filter bounds instead of casting a date at the (UTC) session timezone.
+ */
+export function dayRangeUtc(
+  startDay: string,
+  endDay: string,
+  timezone: string,
+): { since: Date; until: Date } {
+  const since = fromZonedTime(`${startDay}T00:00:00`, timezone);
+  const until = fromZonedTime(
+    `${format(addDays(parseISO(endDay), 1), "yyyy-MM-dd")}T00:00:00`,
+    timezone,
+  );
+  return { since, until };
+}
+
 export function todayInTimezone(timezone: string): string {
   return format(toZonedTime(new Date(), timezone), "yyyy-MM-dd");
 }

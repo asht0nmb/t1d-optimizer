@@ -49,14 +49,15 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+from core.bolus_categories import FOOD_CARRYING
+from core.metrics.cgm_metrics import time_in_range
 from detection.config import AppConfig
 
 __all__ = ["daily_features"]
 
 
-_MEAL_CATEGORIES = frozenset(
-    {"user_meal", "user_meal_and_correction", "override_up"}
-)
+# Canonical food-carrying bolus categories (see ``core.bolus_categories``).
+_MEAL_CATEGORIES = FOOD_CARRYING
 
 _BG_ANCHOR_TOLERANCE_MIN = 10.0
 _POSTPRANDIAL_WINDOW_MIN = 120.0
@@ -152,7 +153,11 @@ def _cgm_features(cgm: pd.DataFrame, config: AppConfig) -> dict:
     severe_high = 250
 
     total = float(bg.size)
-    tir = float(((bg >= low) & (bg <= high)).sum()) / total
+    # TIR delegates to the shared core metric (percent → fraction). The
+    # below/above/severe bands keep their config-driven cut points + the
+    # hardcoded 250 severe edge, which the fixed-cutpoint time_in_bands would
+    # not reproduce, so they stay inline here.
+    tir = time_in_range(bg, low, high) / 100.0
     below = float((bg < low).sum()) / total
     above = float(((bg > high) & (bg <= severe_high)).sum()) / total
     severe = float((bg > severe_high).sum()) / total

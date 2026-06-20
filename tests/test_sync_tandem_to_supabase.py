@@ -175,6 +175,101 @@ class TestIncrementalWindow:
         assert call.args[3] == "2024-06-30"
 
 
+class TestWindowOverride:
+    """Explicit --start/--end window bounds (gap-fill without re-pulling history)."""
+
+    def test_start_override_ignores_fetch_state(self):
+        pump = _make_pump("SN_A", 1, "2021-11-12", "2026-06-20")
+        state = FetchState(
+            source_id="SN_A",
+            last_cursor=None,
+            last_fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+            payload={"last_successful_chunk_end": "2024-06-20"},
+            source_kind="tconnectsync",
+        )
+        start, end = sync.compute_fetch_window(pump, state, start_override="2026-04-15")
+        assert start == "2026-04-15"
+        assert end == "2026-06-20"
+
+    def test_start_override_with_no_fetch_state(self):
+        pump = _make_pump("SN_A", 1, "2021-11-12", "2026-06-20")
+        start, _end = sync.compute_fetch_window(pump, None, start_override="2026-04-15")
+        assert start == "2026-04-15"
+
+    def test_end_override(self):
+        pump = _make_pump("SN_A", 1, "2021-11-12", "2026-06-20")
+        _start, end = sync.compute_fetch_window(
+            pump, None, start_override="2026-04-15", end_override="2026-05-01"
+        )
+        assert end == "2026-05-01"
+
+    def test_run_sync_threads_start_to_fetch(self, patched_sync):
+        sync.run_sync(dry_run=False, start="2026-04-15")
+
+        call = patched_sync.fetch_pump_events.call_args
+        assert call.args[2] == "2026-04-15"
+
+    def test_dry_run_honors_start_override(self, patched_sync):
+        # dry-run never opens the DB (no fetch_state), but an explicit --start
+        # must still bound the preview window instead of full history.
+        sync.run_sync(dry_run=True, start="2026-04-15")
+
+        call = patched_sync.fetch_pump_events.call_args
+        assert call.args[2] == "2026-04-15"
+
+
+class TestArgParsing:
+    def test_start_end_parsed(self):
+        args = sync.parse_args(["--start", "2026-04-15", "--end", "2026-05-01"])
+        assert args.start == "2026-04-15"
+        assert args.end == "2026-05-01"
+
+    def test_invalid_start_rejected(self):
+        with pytest.raises(SystemExit):
+            sync.parse_args(["--start", "not-a-date"])
+
+
+class TestConnectionHardening:
+    """The direct connection must not idle-in-transaction across the long fetch.
+
+    A bookmark SELECT (get_fetch_state, which does not commit) followed by a
+    multi-minute tconnectsync fetch left the connection idle-in-transaction past
+    idle_in_transaction_session_timeout='5min' (migration 0002), dropping the
+    SSL connection mid-sync. autocommit ends each statement's transaction
+    immediately; keepalives guard against network-level idle drops.
+    """
+
+    def test_connect_storage_sets_autocommit(self, monkeypatch):
+        monkeypatch.setenv(
+            "SUPABASE_DB_URL",
+            "postgresql://u@db.example.supabase.co:5432/postgres",
+        )
+        fake_conn = MagicMock()
+        fake_psycopg2 = MagicMock()
+        fake_psycopg2.connect.return_value = fake_conn
+        monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+
+        _storage, conn = sync._connect_storage()
+
+        assert conn is fake_conn
+        assert fake_conn.autocommit is True
+
+    def test_connect_storage_enables_keepalives(self, monkeypatch):
+        monkeypatch.setenv(
+            "SUPABASE_DB_URL",
+            "postgresql://u@db.example.supabase.co:5432/postgres",
+        )
+        fake_conn = MagicMock()
+        fake_psycopg2 = MagicMock()
+        fake_psycopg2.connect.return_value = fake_conn
+        monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+
+        sync._connect_storage()
+
+        kwargs = fake_psycopg2.connect.call_args.kwargs
+        assert kwargs.get("keepalives") == 1
+
+
 class TestOnlySerial:
     def test_only_filters_pumps(self, patched_sync):
         patched_sync.get_pump_metadata.return_value = [

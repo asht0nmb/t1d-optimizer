@@ -1,8 +1,11 @@
 import { searchDays } from "@/lib/queries/search";
 import { getPumpSerial, getTimezone } from "@/lib/config";
 import { jsonError, jsonOk, parseIntParam } from "@/lib/api/route";
+import { requireSession } from "@/lib/api/auth";
 
 export async function GET(req: Request) {
+  const denied = await requireSession();
+  if (denied) return denied;
   const sp = new URL(req.url).searchParams;
   const tirBelow = sp.get("tir_below");
   const alarmsAbove = sp.get("alarms_above");

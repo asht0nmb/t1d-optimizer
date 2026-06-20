@@ -122,7 +122,12 @@ class TestLoadConfig:
         assert cfg.meal_rise.fetch_buffer_minutes == 15
         assert cfg.meal_rise.expected_interval_minutes == 5
         assert cfg.meal_rise.fetch_readings_padding == 3
+        assert cfg.meal_rise.max_reading_age_minutes == 15
         assert "Fast glucose rise" in cfg.meal_rise.alert_template
+
+        assert cfg.meal_rise_calibration.pre_bolus_lookback_minutes == 30
+        assert cfg.meal_rise_calibration.late_bolus_lookahead_minutes == 45
+        assert cfg.meal_rise_calibration.correction_lookahead_minutes == 180
 
         assert cfg.timezone == "America/Los_Angeles"
         assert isinstance(cfg.raw, dict)
@@ -136,6 +141,36 @@ class TestLoadConfig:
         assert cfg.clustering.random_seed == 7
         assert cfg.clustering.model_dir == "custom/models"
         assert cfg.timezone == "America/Los_Angeles"
+
+    def test_meal_rise_max_reading_age_defaults_when_absent(self, tmp_path):
+        # _VALID_CONFIG_YAML omits max_reading_age_minutes → falls back to default.
+        cfg = load_config(_write(tmp_path, _VALID_CONFIG_YAML))
+        assert cfg.meal_rise.max_reading_age_minutes == 15
+
+    def test_meal_rise_max_reading_age_must_be_positive(self, tmp_path):
+        body = _VALID_CONFIG_YAML.replace(
+            "refractory_minutes: 60",
+            "refractory_minutes: 60\n  max_reading_age_minutes: 0",
+        )
+        with pytest.raises(ValueError, match="max_reading_age_minutes"):
+            load_config(_write(tmp_path, body))
+
+    def test_meal_rise_calibration_defaults_when_absent(self, tmp_path):
+        # _VALID_CONFIG_YAML omits the meal_rise_calibration block → defaults.
+        cfg = load_config(_write(tmp_path, _VALID_CONFIG_YAML))
+        assert cfg.meal_rise_calibration.pre_bolus_lookback_minutes == 30
+        assert cfg.meal_rise_calibration.late_bolus_lookahead_minutes == 45
+        assert cfg.meal_rise_calibration.correction_lookahead_minutes == 180
+
+    def test_meal_rise_calibration_must_be_positive(self, tmp_path):
+        body = _VALID_CONFIG_YAML.rstrip() + (
+            "\n\nmeal_rise_calibration:\n"
+            "  pre_bolus_lookback_minutes: 0\n"
+            "  late_bolus_lookahead_minutes: 45\n"
+            "  correction_lookahead_minutes: 180\n"
+        )
+        with pytest.raises(ValueError, match="meal_rise_calibration"):
+            load_config(_write(tmp_path, body))
 
     def test_missing_top_level_key_raises(self, tmp_path):
         # Drop meal_detection entirely.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 
 MAX_HEATMAP_DAYS = 90
 
@@ -31,7 +31,7 @@ def date_window_bounds(
     end: date,
     days: int,
     *,
-    tz: timezone | None = None,
+    tz: tzinfo | None = None,
 ) -> tuple[datetime, datetime]:
     """Return ``(since, until)`` datetimes for ``read_table`` over ``days`` ending on ``end``.
 

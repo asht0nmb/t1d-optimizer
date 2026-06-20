@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -13,19 +13,33 @@ import {
 } from "recharts";
 import type { InsulinResponse } from "@/lib/types/api";
 import { colors } from "@/lib/colors";
+import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/ui/error-state";
+import { EmptyState } from "@/components/ui/empty-state";
 
 export default function InsulinPage() {
   const [data, setData] = useState<InsulinResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const body = await fetch("/api/insulin?days=30").then((r) => r.json());
+      if (body.error) setError(body.error);
+      else setData(body);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load insulin history");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    fetch("/api/insulin?days=30")
-      .then((r) => r.json())
-      .then((body) => {
-        if (body.error) setError(body.error);
-        else setData(body);
-      });
-  }, []);
+    void load();
+  }, [load]);
 
   const rows =
     data?.days.map((d) => ({
@@ -37,21 +51,34 @@ export default function InsulinPage() {
   return (
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold">Insulin history</h1>
-      {error && <p className="text-red-600">{error}</p>}
-      {!data && !error && <p className="text-slate-500">Loading…</p>}
-      {data && (
-        <ResponsiveContainer width="100%" height={400}>
-          <BarChart data={rows}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-            <YAxis tick={{ fontSize: 11 }} />
-            <Tooltip />
-            <Legend />
-            <Bar dataKey="bolus" stackId="a" fill={colors.bolus} name="Bolus" />
-            <Bar dataKey="basal" stackId="a" fill={colors.basalEdge} name="Basal" />
-          </BarChart>
-        </ResponsiveContainer>
-      )}
+      <div aria-live="polite" aria-busy={loading}>
+        {loading ? (
+          <Card className="p-4">
+            <Skeleton className="h-96 w-full" />
+          </Card>
+        ) : error ? (
+          <ErrorState message={error} onRetry={() => void load()} />
+        ) : data && rows.length === 0 ? (
+          <EmptyState
+            title="No insulin data"
+            description="No daily insulin totals in the last 30 days."
+          />
+        ) : data ? (
+          <Card className="p-4">
+            <ResponsiveContainer width="100%" height={400}>
+              <BarChart data={rows}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="bolus" stackId="a" fill={colors.bolus} name="Bolus" />
+                <Bar dataKey="basal" stackId="a" fill={colors.basalEdge} name="Basal" />
+              </BarChart>
+            </ResponsiveContainer>
+          </Card>
+        ) : null}
+      </div>
     </div>
   );
 }

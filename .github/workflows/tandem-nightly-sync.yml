@@ -41,3 +41,17 @@ jobs:
           CACHE_CREDENTIALS: "false"
           PYTHONUNBUFFERED: "1"
         run: uv run python scripts/sync_tandem_to_supabase.py
+
+      # The dashboards silently go stale when this job fails — page the
+      # owner on the same channel the live alerts use.
+      - name: Notify Telegram on failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -sS --max-time 20 -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="Tandem nightly sync FAILED (run ${{ github.run_id }}). Dashboards will go stale until it succeeds. https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            >/dev/null || echo "::warning::Telegram failure notification could not be sent"

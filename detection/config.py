@@ -27,6 +27,7 @@ __all__ = [
     "CONFIG_PATH",
     "MealDetectionConfig",
     "MealRiseConfig",
+    "MealRiseCalibrationConfig",
     "SiteChangeDetectionConfig",
     "get_config",
     "load_config",
@@ -99,6 +100,19 @@ from core.detection.meal_rise import MealRiseConfig
 
 
 @dataclass(frozen=True)
+class MealRiseCalibrationConfig:
+    """Windows for labeling a meal-rise detection against bolus context.
+
+    All values are minutes and must be positive. See
+    `detection/calibration/meal_rise_scoring.py` for how they are applied.
+    """
+
+    pre_bolus_lookback_minutes: int
+    late_bolus_lookahead_minutes: int
+    correction_lookahead_minutes: int
+
+
+@dataclass(frozen=True)
 class AppConfig:
     bg_targets: BgTargets
     meal_detection: MealDetectionConfig
@@ -106,6 +120,7 @@ class AppConfig:
     clustering: ClusteringConfig
     site_change_detection: SiteChangeDetectionConfig
     meal_rise: MealRiseConfig
+    meal_rise_calibration: MealRiseCalibrationConfig
     timezone: str
     raw: dict
 
@@ -133,6 +148,10 @@ def load_config(path: Path | None = None) -> AppConfig:
     clustering = _parse_clustering(raw["clustering"])
     site_change_detection = _parse_site_change_detection(raw["site_change_detection"])
     meal_rise = _parse_meal_rise(raw["meal_rise"])
+    # Optional block: defaults applied when absent so older configs keep working.
+    meal_rise_calibration = _parse_meal_rise_calibration(
+        raw.get("meal_rise_calibration", {})
+    )
     timezone = _parse_timezone(raw["ingestion"])
 
     return AppConfig(
@@ -142,6 +161,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         clustering=clustering,
         site_change_detection=site_change_detection,
         meal_rise=meal_rise,
+        meal_rise_calibration=meal_rise_calibration,
         timezone=timezone,
         raw=raw,
     )
@@ -281,6 +301,7 @@ def _parse_meal_rise(block: dict[str, Any]) -> MealRiseConfig:
     fetch_buffer_minutes = int(block.get("fetch_buffer_minutes", 15))
     expected_interval_minutes = int(block.get("expected_interval_minutes", 5))
     fetch_readings_padding = int(block.get("fetch_readings_padding", 3))
+    max_reading_age_minutes = int(block.get("max_reading_age_minutes", 15))
 
     if not (0 < min_coverage <= 1.0):
         raise ValueError(
@@ -309,6 +330,11 @@ def _parse_meal_rise(block: dict[str, Any]) -> MealRiseConfig:
             f"meal_rise.fetch_readings_padding: must be >= 0, "
             f"got {fetch_readings_padding}"
         )
+    if max_reading_age_minutes <= 0:
+        raise ValueError(
+            f"meal_rise.max_reading_age_minutes: must be > 0, "
+            f"got {max_reading_age_minutes}"
+        )
 
     return MealRiseConfig(
         window_minutes=window_minutes,
@@ -324,6 +350,27 @@ def _parse_meal_rise(block: dict[str, Any]) -> MealRiseConfig:
         fetch_buffer_minutes=fetch_buffer_minutes,
         expected_interval_minutes=expected_interval_minutes,
         fetch_readings_padding=fetch_readings_padding,
+        max_reading_age_minutes=max_reading_age_minutes,
+    )
+
+
+def _parse_meal_rise_calibration(block: dict[str, Any]) -> MealRiseCalibrationConfig:
+    pre = int(block.get("pre_bolus_lookback_minutes", 30))
+    late = int(block.get("late_bolus_lookahead_minutes", 45))
+    corr = int(block.get("correction_lookahead_minutes", 180))
+    for name, val in (
+        ("pre_bolus_lookback_minutes", pre),
+        ("late_bolus_lookahead_minutes", late),
+        ("correction_lookahead_minutes", corr),
+    ):
+        if val <= 0:
+            raise ValueError(
+                f"meal_rise_calibration.{name}: must be > 0, got {val}"
+            )
+    return MealRiseCalibrationConfig(
+        pre_bolus_lookback_minutes=pre,
+        late_bolus_lookahead_minutes=late,
+        correction_lookahead_minutes=corr,
     )
 
 

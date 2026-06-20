@@ -3,11 +3,14 @@ import { getPumpSerial, getTimezone } from "@/lib/config";
 import { fetchDayView } from "@/lib/queries/day";
 import { createServiceClient } from "@/lib/supabase/server";
 import { jsonError, jsonOk } from "@/lib/api/route";
+import { requireSession } from "@/lib/api/auth";
 
 export async function GET(
   _req: Request,
   { params }: { params: { date: string } },
 ) {
+  const denied = await requireSession();
+  if (denied) return denied;
   const date = coerceDateParam(params.date);
   if (!date) {
     return jsonError("Invalid date; use YYYY-MM-DD", 400);

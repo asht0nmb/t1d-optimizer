@@ -23,6 +23,22 @@ def test_handler_class_is_base_http_request_handler():
     assert issubclass(meal_rise_cron.handler, BaseHTTPRequestHandler)
 
 
+def test_verify_authorization_accepts_matching_bearer(monkeypatch):
+    monkeypatch.setenv("CRON_SECRET", "expected")
+    assert meal_rise_cron._verify_authorization({"authorization": "Bearer expected"})
+
+
+def test_verify_authorization_rejects_wrong_bearer(monkeypatch):
+    monkeypatch.setenv("CRON_SECRET", "expected")
+    assert not meal_rise_cron._verify_authorization({"authorization": "Bearer wrong"})
+
+
+def test_verify_authorization_rejects_empty_secret(monkeypatch):
+    # Fail closed when no secret is configured, even with a Bearer header.
+    monkeypatch.delenv("CRON_SECRET", raising=False)
+    assert not meal_rise_cron._verify_authorization({"authorization": "Bearer anything"})
+
+
 def test_handle_cron_request_rejects_missing_auth(monkeypatch):
     monkeypatch.delenv("CRON_SECRET", raising=False)
     status, body = meal_rise_cron.handle_cron_request({})

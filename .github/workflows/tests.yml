@@ -1,0 +1,85 @@
+name: Tests
+
+# Default pytest suite on every push/PR to main. Legacy-marked and
+# supabase-parameterized tests are excluded by default (addopts -m 'not
+# legacy'; supabase contract tests skip without SUPABASE_TEST_URL).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install dependencies
+        # The `local` group (plotly/streamlit) is required by
+        # tests/test_local_dashboard.py; `dev` is default-on. The `ml` group
+        # is intentionally omitted — it is unused by the test suite.
+        run: uv sync --frozen --group local
+
+      - name: Run test suite
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: uv run pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        # Build-time env: Supabase clients read these at module load. Real
+        # secrets are not needed to compile — public-safe placeholders let
+        # `next build` complete (no DB access happens at build time).
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://localhost
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+          SUPABASE_SERVICE_ROLE_KEY: placeholder-service-role-key
+        run: npm run build

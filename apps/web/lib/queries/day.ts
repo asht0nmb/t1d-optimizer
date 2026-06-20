@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { dayWindowUtc } from "@/lib/dates";
 import { loadBgTargets } from "@/lib/config";
 import { computeTirBreakdown } from "@/lib/tir";
+import { integrateBasalUnits } from "@/lib/basal";
 import type {
   AlarmRow,
   BasalRow,
@@ -146,9 +147,15 @@ export async function fetchDayView(
     targets,
   );
   const totalBolus = bolus.reduce((s, b) => s + b.insulin_units, 0);
-  const totalBasal = basal.reduce(
-    (s, b) => s + (b.commanded_rate * 5) / 60,
-    0,
+  // Integrate by true inter-row duration (last row extends to the day end),
+  // matching detection/features.py::_integrate_basal. basal is ordered by
+  // timestamp and filtered to [since, until).
+  const totalBasal = integrateBasalUnits(
+    basal.map((b) => ({
+      timestamp: new Date(b.timestamp),
+      rate: b.commanded_rate,
+    })),
+    until,
   );
   const bgs = cgm.map((p) => p.bg_mgdl);
 
