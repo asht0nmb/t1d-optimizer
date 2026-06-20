@@ -45,7 +45,11 @@ def build_plotly_heatmap_figure(
     end_date: date,
     days: int,
 ) -> go.Figure:
-    """Hour-of-day × date mean BG heatmap with per-cell hover."""
+    """Hour-of-day × date median BG heatmap with per-cell hover.
+
+    Cells aggregate with the median (robust to outliers) to match the web
+    shell (lib/queries/heatmap.ts uses PERCENTILE_CONT(0.5)).
+    """
     if cgm.empty or "timestamp" not in cgm.columns or "bg_mgdl" not in cgm.columns:
         return _placeholder("No CGM data for heatmap.")
 
@@ -58,37 +62,37 @@ def build_plotly_heatmap_figure(
 
     subset["_date"] = ts.loc[mask].dt.date
     subset["_hour"] = ts.loc[mask].dt.hour
-    pivot_mean = subset.pivot_table(
-        index="_hour", columns="_date", values="bg_mgdl", aggfunc="mean"
+    pivot_bg = subset.pivot_table(
+        index="_hour", columns="_date", values="bg_mgdl", aggfunc="median"
     )
     pivot_count = subset.pivot_table(
         index="_hour", columns="_date", values="bg_mgdl", aggfunc="count"
     )
     # Fill missing hours (0..23) so the y-axis is consistent.
-    pivot_mean = pivot_mean.reindex(range(24))
+    pivot_bg = pivot_bg.reindex(range(24))
     pivot_count = pivot_count.reindex(range(24)).fillna(0)
 
-    col_labels = [d.isoformat() for d in pivot_mean.columns]
-    y_labels = [f"{h:02d}:00" for h in pivot_mean.index]
+    col_labels = [d.isoformat() for d in pivot_bg.columns]
+    y_labels = [f"{h:02d}:00" for h in pivot_bg.index]
 
     # Per-cell customdata: [date_iso, hour, n_readings]
     customdata: list[list[list]] = []
-    for hour in pivot_mean.index:
+    for hour in pivot_bg.index:
         row_cd = []
-        for col in pivot_mean.columns:
+        for col in pivot_bg.columns:
             cnt = int(pivot_count.loc[hour, col])
             row_cd.append([col.isoformat(), int(hour), cnt])
         customdata.append(row_cd)
 
     fig = go.Figure(
         data=go.Heatmap(
-            z=pivot_mean.values,
+            z=pivot_bg.values,
             x=col_labels,
             y=y_labels,
             customdata=customdata,
             hovertemplate=(
                 "<b>%{customdata[0]}</b> · %{customdata[1]:02d}:00<br>"
-                "Mean BG <b>%{z:.0f}</b> mg/dL<br>"
+                "Median BG <b>%{z:.0f}</b> mg/dL<br>"
                 "n=%{customdata[2]}<extra></extra>"
             ),
             zauto=False,
@@ -108,7 +112,7 @@ def build_plotly_heatmap_figure(
 
     # Annotate weekly breaks subtly with vertical separators (Mondays).
     weekly_x: list[str] = []
-    for d in pivot_mean.columns:
+    for d in pivot_bg.columns:
         if d.weekday() == 0:
             weekly_x.append(d.isoformat())
     for x in weekly_x:
@@ -116,7 +120,7 @@ def build_plotly_heatmap_figure(
             x=x, line_color="rgba(0,0,0,0.18)", line_width=0.5, line_dash="dot"
         )
 
-    height = max(420, min(720, 24 * len(pivot_mean.index)))
+    height = max(420, min(720, 24 * len(pivot_bg.index)))
     fig.update_layout(
         height=height,
         margin=dict(l=70, r=60, t=20, b=70),

@@ -183,7 +183,7 @@ def test_cron_no_rise_detected(patch_cron_io, monkeypatch, memory_storage, mock_
     mock_dexcom_class.return_value.get_glucose_readings.return_value = mock_readings
     monkeypatch.setattr("apps.personal.cron.detect_meal_rise.Dexcom", mock_dexcom_class)
 
-    exit_code = run_cron()
+    exit_code = run_cron(now=anchor_ts_utc + timedelta(minutes=2))  # fresh
     assert exit_code == 0
 
     # Verify no alerts were recorded or sent
@@ -208,7 +208,7 @@ def test_cron_sharp_rise_breakfast_triggers_alert(patch_cron_io, monkeypatch, me
     mock_dexcom_class.return_value.get_glucose_readings.return_value = mock_readings
     monkeypatch.setattr("apps.personal.cron.detect_meal_rise.Dexcom", mock_dexcom_class)
 
-    exit_code = run_cron()
+    exit_code = run_cron(now=anchor_ts_utc + timedelta(minutes=2))  # fresh
     assert exit_code == 0
 
     # 1. Assert Telegram message was sent
@@ -272,11 +272,58 @@ def test_cron_refractory_suppresses_consecutive_alert(patch_cron_io, monkeypatch
         )
     )
 
-    exit_code = run_cron()
+    exit_code = run_cron(now=anchor_ts_utc + timedelta(minutes=2))  # fresh; tests refractory, not freshness
     assert exit_code == 0
 
     # Since it was sent within the 60-minute refractory cooldown, Telegram is NOT called
     patch_cron_io.assert_not_called()
+
+
+def test_cron_skips_stale_reading(patch_cron_io, monkeypatch, memory_storage, mock_env):
+    """A sharp rise on STALE CGM data must not fire: no Telegram, no records.
+
+    Guards against acting on an old Dexcom Share window (observed live: the
+    latest shared reading can be many hours old when no sensor is active).
+    """
+    anchor_ts_utc = datetime(2026, 5, 25, 15, 0, tzinfo=timezone.utc)
+    bg_values = [150, 140, 130, 120, 112, 105, 100]  # newest (150) sits at anchor
+    mock_readings = [
+        MockGlucoseReading(bg_values[i], anchor_ts_utc - timedelta(minutes=5 * i))
+        for i in range(7)
+    ]
+    mock_dexcom_class = MagicMock()
+    mock_dexcom_class.return_value.get_glucose_readings.return_value = mock_readings
+    monkeypatch.setattr("apps.personal.cron.detect_meal_rise.Dexcom", mock_dexcom_class)
+
+    # Newest reading is 60 min old relative to the injected "now" → stale.
+    stale_now = anchor_ts_utc + timedelta(minutes=60)
+    exit_code = run_cron(now=stale_now)
+
+    assert exit_code == 0
+    patch_cron_io.assert_not_called()
+    assert len(memory_storage.recent_alerts("meal_rise", timedelta(hours=24))) == 0
+    assert len(memory_storage.list_detection_results(kind="meal_rise")) == 0
+
+
+def test_cron_fresh_reading_still_fires(patch_cron_io, monkeypatch, memory_storage, mock_env):
+    """The freshness guard must not over-skip: a fresh sharp rise still fires."""
+    anchor_ts_utc = datetime(2026, 5, 25, 15, 0, tzinfo=timezone.utc)
+    bg_values = [150, 140, 130, 120, 112, 105, 100]
+    mock_readings = [
+        MockGlucoseReading(bg_values[i], anchor_ts_utc - timedelta(minutes=5 * i))
+        for i in range(7)
+    ]
+    mock_dexcom_class = MagicMock()
+    mock_dexcom_class.return_value.get_glucose_readings.return_value = mock_readings
+    monkeypatch.setattr("apps.personal.cron.detect_meal_rise.Dexcom", mock_dexcom_class)
+
+    # Newest reading is 2 min old → fresh.
+    fresh_now = anchor_ts_utc + timedelta(minutes=2)
+    exit_code = run_cron(now=fresh_now)
+
+    assert exit_code == 0
+    patch_cron_io.assert_called_once()
+    assert len(memory_storage.list_detection_results(kind="meal_rise")) == 1
 
 
 def test_dexcom_max_count_derived_from_config():
@@ -454,3 +501,44 @@ def test_retry_failed_alert_deliveries_respects_backoff(
     assert summary == {"retried": 0, "succeeded": 0}
     send.assert_not_called()
 
+
+
+def test_cron_writes_live_heartbeat(patch_cron_io, monkeypatch, memory_storage, mock_env):
+    """Every completed cycle (even a no-op) records a live_cron heartbeat so
+    the worker's liveness is observable, independent of whether a rise fired."""
+    anchor_ts_utc = datetime(2026, 5, 25, 15, 0, tzinfo=timezone.utc)
+    mock_readings = [
+        MockGlucoseReading(120, anchor_ts_utc - timedelta(minutes=5 * i))
+        for i in range(10)
+    ]
+    mock_dexcom_class = MagicMock()
+    mock_dexcom_class.return_value.get_glucose_readings.return_value = mock_readings
+    monkeypatch.setattr("apps.personal.cron.detect_meal_rise.Dexcom", mock_dexcom_class)
+
+    now = anchor_ts_utc + timedelta(minutes=2)
+    exit_code = run_cron(now=now)
+    assert exit_code == 0
+
+    hb = memory_storage.get_fetch_state("live_cron")
+    assert hb is not None
+    assert hb.last_fetched_at == now
+
+
+def test_cron_failure_skips_heartbeat_and_alerts(patch_cron_io, monkeypatch, memory_storage, mock_env):
+    """When the cycle raises, NO heartbeat is written (its absence is the
+    liveness signal) and a worker-failure Telegram alert is sent."""
+    def _boom(*a, **k):
+        raise RuntimeError("dexcom exploded")
+
+    monkeypatch.setattr("apps.personal.cron.detect_meal_rise.fetch_dexcom_cgm", _boom)
+
+    now = datetime(2026, 5, 25, 15, 0, tzinfo=timezone.utc)
+    exit_code = run_cron(now=now)
+    assert exit_code == 1
+
+    # No success heartbeat.
+    assert memory_storage.get_fetch_state("live_cron") is None
+    # A failure alert was sent via the telegram sender.
+    assert patch_cron_io.called
+    sent_text = " ".join(str(c.args) for c in patch_cron_io.call_args_list)
+    assert "error" in sent_text.lower() or "worker" in sent_text.lower()

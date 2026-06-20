@@ -2,6 +2,7 @@ import { queryRows } from "@/lib/queries/db";
 import { loadBgTargets } from "@/lib/config";
 import type { SearchResponse, SearchResultRow } from "@/lib/types/api";
 import { resolveAnchorDay, windowStart } from "@/lib/queries/window-anchor";
+import { dayRangeUtc } from "@/lib/dates";
 
 interface SearchRow {
   day: string;
@@ -32,10 +33,17 @@ export async function searchDays(
   const pageSize = filters.pageSize ?? 30;
   const offset = (page - 1) * pageSize;
 
-  const params: unknown[] = [targets.low, targets.high, tz, startDay, anchorDay];
+  const { since, until } = dayRangeUtc(startDay, anchorDay, tz);
+  const params: unknown[] = [
+    targets.low,
+    targets.high,
+    tz,
+    since.toISOString(),
+    until.toISOString(),
+  ];
   const where: string[] = [
-    "c.timestamp >= $4::date",
-    "c.timestamp < ($5::date + interval '1 day')",
+    "c.timestamp >= $4::timestamptz",
+    "c.timestamp < $5::timestamptz",
   ];
   const having: string[] = [];
 
@@ -74,8 +82,8 @@ export async function searchDays(
         (a.timestamp AT TIME ZONE $3)::date AS day,
         COUNT(*) FILTER (WHERE a.action = 'activated')::int AS alarm_count
       FROM alarms a
-      WHERE a.timestamp >= $4::date
-        AND a.timestamp < ($5::date + interval '1 day')
+      WHERE a.timestamp >= $4::timestamptz
+        AND a.timestamp < $5::timestamptz
         ${pumpSerial ? `AND a.pump_serial = $6` : ""}
       GROUP BY 1
     ),

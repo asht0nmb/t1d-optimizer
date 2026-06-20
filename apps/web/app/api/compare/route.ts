@@ -3,8 +3,11 @@ import { fetchCompare } from "@/lib/queries/compare";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getPumpSerial, getTimezone } from "@/lib/config";
 import { jsonError, jsonOk } from "@/lib/api/route";
+import { requireSession } from "@/lib/api/auth";
 
 export async function GET(req: Request) {
+  const denied = await requireSession();
+  if (denied) return denied;
   const sp = new URL(req.url).searchParams;
   const dateA = coerceDateParam(sp.get("a"));
   const dateB = coerceDateParam(sp.get("b"));

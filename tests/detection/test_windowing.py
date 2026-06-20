@@ -122,6 +122,79 @@ def test_make_window_gaps():
     assert window.has_gap
 
 
+@pytest.mark.parametrize(
+    "g_start_off, g_end_off, ongoing, expect_gap, label",
+    [
+        # offsets are minutes relative to anchor (window is [-30, 0]).
+        (-20, -10, False, True, "fully inside window"),
+        (-45, -20, False, True, "straddles window start"),
+        (-10, 10, False, True, "straddles window end"),
+        (-60, -45, False, False, "entirely before window"),
+        # Genuinely current ongoing gap during the window: must still flag.
+        (-10, None, True, True, "current ongoing gap overlaps window"),
+    ],
+)
+def test_make_window_gap_overlap_matrix(
+    g_start_off, g_end_off, ongoing, expect_gap, label
+):
+    anchor_ts = datetime(2026, 5, 25, 12, 0, tzinfo=TZ)
+    anchor = Anchor(anchor_ts, "live")
+    timestamps = [
+        anchor_ts - timedelta(minutes=30) + timedelta(minutes=5 * i)
+        for i in range(7)
+    ]
+    cgm_df = pd.DataFrame({"timestamp": timestamps, "bg_mgdl": [120] * 7})
+
+    g_end = (
+        pd.NaT
+        if g_end_off is None
+        else anchor_ts + timedelta(minutes=g_end_off)
+    )
+    gaps_df = pd.DataFrame(
+        {
+            "start_ts": [anchor_ts + timedelta(minutes=g_start_off)],
+            "end_ts": [g_end],
+            "ongoing": [ongoing],
+        }
+    )
+    window = make_window(
+        cgm_df, anchor, pre=timedelta(minutes=30), post=timedelta(0),
+        gaps_df=gaps_df,
+    )
+    assert window.has_gap is expect_gap, label
+
+
+def test_stale_ongoing_gap_does_not_suppress_present_window():
+    """A never-cleared ongoing gap from long ago must NOT flag a current window.
+
+    Regression: ONGOING_GAP_HORIZON extended an open gap's end forward by
+    3650 days, so an old open `cgm_out_of_range` row marked every future
+    window has_gap=True even when the window has full present coverage —
+    silently killing the live meal-rise alert loop (false negative).
+    """
+    anchor_ts = datetime(2026, 5, 25, 12, 0, tzinfo=TZ)
+    anchor = Anchor(anchor_ts, "live")
+    timestamps = [
+        anchor_ts - timedelta(minutes=30) + timedelta(minutes=5 * i)
+        for i in range(7)
+    ]
+    cgm_df = pd.DataFrame({"timestamp": timestamps, "bg_mgdl": [120] * 7})
+
+    # Ongoing gap that STARTED 120 days before the window and was never closed.
+    gaps_df = pd.DataFrame(
+        {
+            "start_ts": [anchor_ts - timedelta(days=120)],
+            "end_ts": [pd.NaT],
+            "ongoing": [True],
+        }
+    )
+    window = make_window(
+        cgm_df, anchor, pre=timedelta(minutes=30), post=timedelta(0),
+        gaps_df=gaps_df,
+    )
+    assert window.has_gap is False
+
+
 def test_make_window_uneven_spacing_coverage():
     anchor_ts = datetime(2026, 5, 25, 12, 0, tzinfo=TZ)
     anchor = Anchor(anchor_ts, "live")

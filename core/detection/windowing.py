@@ -12,8 +12,17 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 DEFAULT_INTERVAL = timedelta(minutes=5)
-# Open-ended CGM gaps are treated as overlapping any window that starts after g_start.
-ONGOING_GAP_HORIZON = timedelta(days=3650)
+# An ongoing (open-ended) CGM gap has no recorded end. We treat it as still
+# active only while it stays *recent* relative to the window: if its start
+# predates the window's own time span by more than this bound, the window's
+# present CGM coverage already proves the signal is back, so a never-cleared
+# stale `cgm_out_of_range` row must NOT suppress detection forever.
+#
+# The bound is the maximum trailing span any caller windows over (a few hours)
+# with generous headroom — large enough that a genuinely current open gap that
+# began just before the window still flags, small enough that an open gap from
+# days/weeks/years ago does not.
+ONGOING_GAP_RECENCY = timedelta(hours=12)
 
 
 @dataclass(frozen=True)
@@ -106,12 +115,16 @@ def make_window(
         for _, row in gaps_df.iterrows():
             g_start = row["start_ts"]
             g_end = row.get("end_ts")
-            ongoing = bool(row.get("ongoing", False))
+            ongoing = pd.isna(g_end) or bool(row.get("ongoing", False))
 
-            # Handle ongoing gaps
-            if pd.isna(g_end) or ongoing:
-                g_end = g_start + ONGOING_GAP_HORIZON
-
+            # An ongoing gap has no recorded end. Bounding its end at
+            # g_start + ONGOING_GAP_RECENCY (rather than a 10-year horizon)
+            # means a stale, never-cleared open gap from long before the
+            # window no longer overlaps it — the window's own CGM coverage
+            # proves the signal has returned. A genuinely current open gap
+            # that started just before/within the window still overlaps.
+            if ongoing:
+                g_end = g_start + ONGOING_GAP_RECENCY
 
             # Overlap check: start <= g_end and end >= g_start
             # Ensure timestamps are aligned or both timezone-aware/naive

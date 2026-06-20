@@ -74,5 +74,12 @@ meal_rise:
     - {start_hour: 17, end_hour: 21, multiplier: 0.7}
   off_hours_multiplier: 1.3
   refractory_minutes: 60
+  max_reading_age_minutes: 15   # skip detection when the newest CGM reading is older than this (stale Dexcom Share data); ~3 missed 5-min cycles
   alert_template: "Fast glucose rise: {start} to {end} mg/dL (about {delta} up in {minutes} min). Flagging in case a meal went unbolused."
+
+# M2 calibration: windows for labeling each meal-rise detection against bolus context.
+meal_rise_calibration:
+  pre_bolus_lookback_minutes: 30      # food bolus this far before the rise start → pre_bolused
+  late_bolus_lookahead_minutes: 45    # food bolus up to this far after the rise start → late_bolused
+  correction_lookahead_minutes: 180   # window to attribute an uncovered miss to a user/auto correction
 

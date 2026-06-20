@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
+from core.metrics.cgm_metrics import time_in_range
 from ingestion.view_data import ViewMode
 from scripts.daily_viz import (
     _cluster_boluses,
@@ -117,7 +118,8 @@ def _compute_stats(
     high: float,
 ) -> DayStats:
     bg = cgm["bg_mgdl"]
-    tir = ((bg >= low) & (bg <= high)).mean() * 100
+    # cgm is guaranteed non-empty here (slice_day_frames returns None on empty).
+    tir = time_in_range(bg, low, high)
     tdd_bolus = bolus["insulin_units"].sum() if not bolus.empty else 0.0
     tdd_basal = (
         (basal["commanded_rate"] * 5 / 60).sum() if not basal.empty else 0.0

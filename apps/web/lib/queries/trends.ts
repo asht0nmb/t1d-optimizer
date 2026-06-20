@@ -2,6 +2,7 @@ import { queryRows } from "@/lib/queries/db";
 import { loadBgTargets } from "@/lib/config";
 import type { TirTrendPoint, TrendsResponse } from "@/lib/types/api";
 import { resolveAnchorDay, windowStart } from "@/lib/queries/window-anchor";
+import { dayRangeUtc } from "@/lib/dates";
 
 interface TrendRow {
   day: string;
@@ -20,7 +21,14 @@ export async function fetchTrends(
   const targets = loadBgTargets();
   const anchorDay = await resolveAnchorDay(timezone, pumpSerial);
   const startDay = windowStart(anchorDay, windowDays);
-  const params: unknown[] = [targets.low, targets.high, timezone, startDay, anchorDay];
+  const { since, until } = dayRangeUtc(startDay, anchorDay, timezone);
+  const params: unknown[] = [
+    targets.low,
+    targets.high,
+    timezone,
+    since.toISOString(),
+    until.toISOString(),
+  ];
   let pumpClause = "";
   if (pumpSerial) {
     params.push(pumpSerial);
@@ -33,8 +41,8 @@ export async function fetchTrends(
         (timestamp AT TIME ZONE $3)::date AS day,
         bg_mgdl
       FROM cgm
-      WHERE timestamp >= $4::date
-        AND timestamp < ($5::date + interval '1 day')
+      WHERE timestamp >= $4::timestamptz
+        AND timestamp < $5::timestamptz
         ${pumpClause}
     )
     SELECT

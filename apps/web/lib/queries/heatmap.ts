@@ -1,4 +1,5 @@
 import { queryRows } from "@/lib/queries/db";
+import { dayRangeUtc } from "@/lib/dates";
 import type { HeatmapCell, HeatmapResponse } from "@/lib/types/api";
 
 interface HeatmapRow {
@@ -15,7 +16,8 @@ export async function fetchHeatmap(
   timezone: string,
   pumpSerial?: string,
 ): Promise<HeatmapResponse> {
-  const params: unknown[] = [dateFrom, dateTo, timezone];
+  const { since, until } = dayRangeUtc(dateFrom, dateTo, timezone);
+  const params: unknown[] = [since.toISOString(), until.toISOString(), timezone];
   let pumpClause = "";
   if (pumpSerial) {
     params.push(pumpSerial);
@@ -30,8 +32,8 @@ export async function fetchHeatmap(
       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY bg_mgdl)::float AS median_bg,
       COUNT(*)::int AS n
     FROM cgm
-    WHERE timestamp >= $1::date
-      AND timestamp < ($2::date + interval '1 day')
+    WHERE timestamp >= $1::timestamptz
+      AND timestamp < $2::timestamptz
       ${pumpClause}
     GROUP BY 1, 2
     ORDER BY 1, 2

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-T1D Engine is a Type 1 diabetes data intelligence system. It ingests CGM + insulin pump data, detects events (missed meals, anomalies), clusters daily BG patterns, and will surface insights via Telegram and a Streamlit dashboard. Read `TECHNICAL_SPEC.md` before writing any code.
+T1D Engine is a Type 1 diabetes data intelligence system. It ingests CGM + insulin pump data, detects events (missed meals, anomalies), clusters daily BG patterns, and surfaces insights via a live Telegram alert loop, a Next.js personal dashboard, and a local Streamlit dashboard. Read `TECHNICAL_SPEC.md` before writing any code.
 
 ## Commands
 
@@ -26,13 +26,20 @@ uv run jupyter notebook research.ipynb
 
 ## Architecture
 
-The ingestion + enrichment + detection layers are in place; surfaces (Telegram / Streamlit / live pydexcom) are not yet built. Current layout:
+The ingestion + enrichment + detection layers are in place, and three surfaces are shipped: a live Telegram meal-rise alert loop, a Next.js personal dashboard (Vercel + Supabase), and a local Streamlit dashboard. Current layout:
 
-- `core/` — storage-agnostic library shared by every deployment shell. Houses the `Storage` Protocol (`core/storage/protocol.py`), the schema registry (`core/schema.py`), typed metadata records (`core/storage/records.py`), and three implementations (`core/storage/parquet.py`, `core/storage/memory.py`, `core/storage/supabase.py`). The pandas → Postgres converters that `SupabaseStorage` and the bootstrap script share live in `core/storage/_postgres_converters.py`.
+- `core/` — storage-agnostic library shared by every deployment shell. Houses the `Storage` Protocol (`core/storage/protocol.py`), the schema registry (`core/schema.py`), typed metadata records (`core/storage/records.py`), and three implementations (`core/storage/parquet.py`, `core/storage/memory.py`, `core/storage/supabase.py`). The pandas → Postgres converters that `SupabaseStorage` and the bootstrap script share live in `core/storage/_postgres_converters.py`. `core/detection/` holds the shared windowing helper and the meal-rise detector.
 - `ingestion/` — tconnectsync client, per-event-type builders, enrichment (`bolus_category`, `forced_by_alarm`, `site_issues`, `cgm_gaps`), parquet storage shim (`ingestion/storage.py` delegates to `ParquetStorage`), shared view-mode helper (`view_data.py`).
-- `detection/` — typed `AppConfig` + `daily_features` patterns-layer foundation. Source-agnostic: pure DataFrame-in / DataFrame-out, no ingestion imports. v1 reference implementation (anomaly / meal / clustering) is quarantined under `detection/legacy/` — see its README.
-- `scripts/` — CLI entry points: `sanity_check` (check), `daily_viz` (viz), `doctor`.
-- `tests/` — 477 passing tests in the default suite across builders, storage, enrichment, detection features/config, CLI, and the storage Protocol contract suite under `tests/core/` (an additional 34 supabase-parameterized tests skip unless `SUPABASE_TEST_URL` is set). 47 additional `legacy`-marked tests cover `detection/legacy/*` and run opt-in via `uv run pytest -m legacy`.
+- `detection/` — typed `AppConfig` + `daily_features` patterns-layer foundation. Source-agnostic: pure DataFrame-in / DataFrame-out, no ingestion imports. v1 reference implementation (anomaly / meal / clustering) is quarantined under `detection/legacy/` — see its README. `detection/calibration/` holds the M2 meal-rise scoring module.
+- `apps/local/` — local Streamlit OSS dashboard: day view, heatmap, TIR panel, insulin, AGP, compare — Plotly charts. Runs against parquet files with no cloud accounts required. AGP percentiles come from `core/metrics/agp.py`.
+- `apps/web/` — Next.js personal dashboard deployed on Vercel + Supabase. Routes: day view, heatmap, TIR trends, insulin panel, search, compare, AGP, alerts history, status. All `/api/*` data routes require a signed-in session (`lib/api/auth.ts`).
+- `apps/personal/cron/` — live meal-rise alert loop: polls Dexcom every 5 min, runs the detector, sends a Telegram alert on a missed-meal signal. Invoked by the Vercel Python worker at `api/index.py` (a separate Vercel project), triggered by external cron-job.org.
+- `apps/personal/telegram/` — deterministic Telegram command surface (`/today`, `/yesterday`, `/trends`, `/status`, `/help`). Webhook entrypoint `api/telegram.py` (same cron-worker Vercel project). No LLM — pure aggregates over the Storage layer; secret-token + chat-allowlist auth.
+- `core/metrics/` — shared metric definitions (AGP hourly percentile profile); pure pandas/numpy, consumed by local charts and mirrored by web SQL.
+- `db/migrations/` — Supabase schema migrations and RLS policies.
+- `.github/workflows/` — nightly Tandem sync (Telegram alert on failure), manual meal-rise fallback, smoke test, and pytest CI.
+- `scripts/` — CLI entry points: `sanity_check` (check), `daily_viz` (viz), `doctor`; `score_meal_rise.py` (M2 calibration report — advisory only).
+- `tests/` — 730 passed, 42 skipped, 48 deselected in the default suite across builders, storage, enrichment, detection features/config, the `core/metrics/` clinical-analytics suite (golden + hypothesis property tests), CLI, the storage Protocol contract suite under `tests/core/`, and Telegram command/digest/handler tests under `tests/personal/` (supabase-parameterized tests skip unless `SUPABASE_TEST_URL` is set; integration-marked tests are deselected by default). 47 additional `legacy`-marked tests cover `detection/legacy/*` and run opt-in via `uv run pytest -m legacy`. The web shell has its own vitest suite (93 tests) + `tsc --noEmit` + `next build`, gated in CI alongside pytest.
 
 ### `core/` package boundary
 
@@ -63,8 +70,8 @@ When you finish a substantive change, write a dated `docs/updates/YYYY-MM-DD-*.m
 ### Data Pipeline
 
 Two ingestion modes:
-1. **Historical**: Tandem CSV exports (in `data/`) and tconnectsync
-2. **Live**: pydexcom for real-time Dexcom CGM readings (every 5 min) — **not yet implemented**
+1. **Historical**: Tandem CSV exports (in `data/`) and tconnectsync, synced nightly to Supabase via a GitHub Actions workflow.
+2. **Live**: pydexcom polls the Dexcom Share API every 5 minutes. The live loop (`apps/personal/cron/`) runs the meal-rise detector on each new reading and fires a Telegram alert when a missed-meal signal is detected. The loop is invoked by a Vercel Python worker (`api/index.py`) triggered by cron-job.org.
 
 The detection engine must be **source-agnostic** — it operates on normalized data regardless of ingestion source.
 
@@ -97,9 +104,15 @@ The first 6 lines are a metadata header (device info, software version, report d
 - `test_data/` — anonymized copies for testing
 - `core/` — storage-agnostic Protocol library (`core/schema.py`, `core/storage/`)
 - `ingestion/` — tconnectsync client, builders, enrichment, storage shim, view-mode helper
-- `detection/` — typed config + `daily_features` patterns-layer foundation. `detection/legacy/` holds the v1 reference implementation (not maintained, not imported from production code).
+- `detection/` — typed config + `daily_features` patterns-layer foundation. `detection/legacy/` holds the v1 reference implementation (not maintained, not imported from production code). `detection/calibration/` holds the M2 meal-rise scoring module.
+- `core/detection/` — shared windowing helper and meal-rise detector (used by the live loop).
+- `apps/local/` — local Streamlit OSS dashboard (day/heatmap/TIR, Plotly).
+- `apps/web/` — Next.js personal dashboard (Vercel + Supabase, Phase A routes).
+- `apps/personal/cron/` — live Dexcom poll → detect → Telegram alert loop; `api/index.py` is the Vercel Python worker that invokes it.
+- `db/migrations/` — Supabase schema and RLS migrations.
+- `.github/workflows/` — nightly Tandem sync, manual meal-rise fallback, smoke test, pytest CI.
 - `scripts/` — CLI entry points (`sanity_check`, `daily_viz`, `doctor`)
-- `tests/` — pytest suite (477 default, plus 47 legacy-marked tests opt-in via `-m legacy`); Storage Protocol contract suite under `tests/core/`
+- `tests/` — pytest suite (730 passed / 42 skipped / 48 deselected by default, plus 47 legacy-marked tests opt-in via `-m legacy`); Storage Protocol contract suite and `core/metrics/` analytics tests under `tests/core/`
 - `docs/operating_docs/` — `TECHNICAL_SPEC.md`, `DATA_CATALOG.md`, `DATA_NOTES.md`, `DATA_NOTES_2.md`, `DATA_ISSUES.md`, `api_levels.md`, `tconnectsync_api_map.md`
 - `docs/updates/` — dated session write-ups (`YYYY-MM-DD-*.md`); append-only audit log
 - `research.ipynb` — exploratory analysis notebook

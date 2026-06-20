@@ -1,6 +1,7 @@
 import { queryRows } from "@/lib/queries/db";
 import type { InsulinDayRow, InsulinResponse } from "@/lib/types/api";
 import { resolveAnchorDay, windowStart } from "@/lib/queries/window-anchor";
+import { dayRangeUtc } from "@/lib/dates";
 
 interface InsulinRow {
   day: string;
@@ -15,7 +16,16 @@ export async function fetchInsulinHistory(
 ): Promise<InsulinResponse> {
   const anchorDay = await resolveAnchorDay(timezone, pumpSerial);
   const startDay = windowStart(anchorDay, days);
-  const params: unknown[] = [timezone, startDay, anchorDay];
+  const { since, until } = dayRangeUtc(startDay, anchorDay, timezone);
+  // $2/$3 are local-day strings for the generate_series spine; $4/$5 are the
+  // UTC instant bounds used for the timestamptz row filters.
+  const params: unknown[] = [
+    timezone,
+    startDay,
+    anchorDay,
+    since.toISOString(),
+    until.toISOString(),
+  ];
   let pumpClause = "";
   if (pumpSerial) {
     params.push(pumpSerial);
@@ -35,20 +45,43 @@ export async function fetchInsulinHistory(
         (timestamp AT TIME ZONE $1)::date AS day,
         SUM(insulin_units)::float AS bolus_units
       FROM bolus
-      WHERE timestamp >= $2::date
-        AND timestamp < ($3::date + interval '1 day')
+      WHERE timestamp >= $4::timestamptz
+        AND timestamp < $5::timestamptz
         ${pumpClause}
       GROUP BY 1
     ),
-    basal_daily AS (
+    basal_windowed AS (
+      -- Integrate by true inter-row duration, per local day. Mirrors
+      -- detection/features.py::_integrate_basal: each row spans
+      -- [ts, min(next_ts, day_end)); the final row of a day extends to that
+      -- day's end. A fixed rate * 5/60 cadence assumption is wrong because
+      -- Tandem basal rows are event-driven (emitted only on rate changes).
       SELECT
         (timestamp AT TIME ZONE $1)::date AS day,
-        SUM(commanded_rate * 5.0 / 60.0)::float AS basal_units
+        commanded_rate,
+        timestamp AS row_ts,
+        -- End of this row's local day, expressed as a UTC instant.
+        ((((timestamp AT TIME ZONE $1)::date + interval '1 day')
+          AT TIME ZONE $1)) AS day_end,
+        LEAD(timestamp) OVER (
+          PARTITION BY pump_serial, (timestamp AT TIME ZONE $1)::date
+          ORDER BY timestamp
+        ) AS next_ts
       FROM basal
-      WHERE timestamp >= $2::date
-        AND timestamp < ($3::date + interval '1 day')
+      WHERE timestamp >= $4::timestamptz
+        AND timestamp < $5::timestamptz
         ${pumpClause}
-      GROUP BY 1
+    ),
+    basal_daily AS (
+      SELECT
+        day,
+        SUM(
+          commanded_rate
+          * EXTRACT(EPOCH FROM (LEAST(COALESCE(next_ts, day_end), day_end) - row_ts))
+          / 3600.0
+        )::float AS basal_units
+      FROM basal_windowed
+      GROUP BY day
     )
     SELECT
       d.day::text,

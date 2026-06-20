@@ -9,6 +9,7 @@ Legacy URL ``/api/meal_rise_cron`` is rewritten to this function in vercel.json.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sys
@@ -34,7 +35,7 @@ def _verify_authorization(headers: dict[str, str]) -> bool:
     if not secret:
         return False
     auth = headers.get("authorization") or headers.get("Authorization") or ""
-    return auth == f"Bearer {secret}"
+    return hmac.compare_digest(auth, f"Bearer {secret}")
 
 
 def handle_cron_request(headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
