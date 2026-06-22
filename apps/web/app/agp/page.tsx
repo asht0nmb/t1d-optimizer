@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import { useCallback, useEffect, useState } from "react";
 import { AgpChart } from "@/components/AgpChart";
@@ -19,7 +20,7 @@ export default function AgpPage() {
     setLoading(true);
     setError(null);
     try {
-      const body = await fetch(`/api/agp?days=${days}`).then((r) => r.json());
+      const body = await fetchJson<AgpResponse>(`/api/agp?days=${days}`);
       if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {

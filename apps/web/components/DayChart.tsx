@@ -18,6 +18,7 @@ import { bgSegmentColor, colors } from "@/lib/colors";
 import { dayWindowUtc } from "@/lib/dates";
 import {
   clipIntervalToWindow,
+  siteIssueEndTs,
   snapIntervalToTimestamps,
 } from "@/lib/overlays";
 import {
@@ -62,8 +63,6 @@ function toChartRows(data: DayViewResponse) {
   return { cgmRows, bolusRows, basalRows };
 }
 
-const HOUR_MS = 60 * 60 * 1000;
-
 interface OverlayArea {
   x1: number;
   x2: number;
@@ -104,13 +103,10 @@ function buildOverlayAreas(data: DayViewResponse): {
     .filter(isArea);
 
   const siteIssues = data.site_issues
-    .map((s) =>
-      snap(
-        s.first_occlusion_ts,
-        s.last_occlusion_ts ??
-          new Date(Date.parse(s.first_occlusion_ts) + HOUR_MS).toISOString(),
-      ),
-    )
+    .map((s) => {
+      const end = siteIssueEndTs(s.first_occlusion_ts, s.last_occlusion_ts);
+      return end ? snap(s.first_occlusion_ts, end) : null;
+    })
     .filter(isArea);
 
   return { gaps, siteIssues };

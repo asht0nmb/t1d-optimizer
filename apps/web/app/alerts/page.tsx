@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import { useCallback, useEffect, useState } from "react";
 import type { AlertsResponse } from "@/lib/types/api";
@@ -20,9 +21,7 @@ export default function AlertsPage() {
     setLoading(true);
     setError(null);
     try {
-      const body = await fetch(`/api/alerts?page=${page}&page_size=30`).then((r) =>
-        r.json(),
-      );
+      const body = await fetchJson<AlertsResponse>(`/api/alerts?page=${page}&page_size=30`);
       if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {
