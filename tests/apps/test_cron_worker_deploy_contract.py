@@ -142,14 +142,30 @@ def test_root_requirements_exists_and_is_slim():
         assert needed in joined, f"{needed} missing from worker requirements.txt"
 
 
-def test_vercelignore_hides_uv_lock_and_pyproject():
-    # Without hiding these, Vercel installs from uv.lock/pyproject.toml (the full
-    # project) instead of the slim requirements.txt.
-    assert _VERCELIGNORE.is_file(), ".vercelignore is required to force the slim install"
-    entries = {
+def _vercelignore_entries() -> set[str]:
+    return {
         ln.strip()
         for ln in _VERCELIGNORE.read_text(encoding="utf-8").splitlines()
         if ln.strip() and not ln.strip().startswith("#")
     }
+
+
+def test_vercelignore_hides_uv_lock_and_pyproject():
+    # Without hiding these, Vercel installs from uv.lock/pyproject.toml (the full
+    # project) instead of the slim requirements.txt.
+    assert _VERCELIGNORE.is_file(), ".vercelignore is required to force the slim install"
+    entries = _vercelignore_entries()
     assert "uv.lock" in entries
     assert "pyproject.toml" in entries
+
+
+def test_vercelignore_does_not_strip_shared_source_dirs():
+    # The repo-root .vercelignore is read by BOTH Vercel projects (the worker
+    # AND the apps/web dashboard, whose Root Directory is apps/web). Excluding a
+    # source dir here empties the web build -> 404 on every route. Guard against
+    # re-adding apps/web (the regression) or other source dirs.
+    entries = _vercelignore_entries()
+    for forbidden in ("apps/web", "apps/web/", "apps", "apps/personal", "core", "detection"):
+        assert forbidden not in entries, (
+            f"{forbidden!r} in .vercelignore would strip source from the web project"
+        )

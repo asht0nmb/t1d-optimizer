@@ -1,17 +1,15 @@
-# Force Vercel's Python builder to install the slim root requirements.txt rather
-# than the full project. Vercel installs from uv.lock (or pyproject.toml) when
-# present — the whole locked stack (jupyter, pyarrow, scipy, scikit-learn,
-# matplotlib, tconnectsync) is ~654 MB, over the 500 MB limit. Hiding both makes
-# it fall back to requirements.txt (~130 MB).
+# SHARED by BOTH Vercel projects — the repo-root .vercelignore is read by the
+# web project (Root Directory apps/web) AND the Python worker (Root Directory .).
+# Only list files that NEITHER project needs.
+#
+# Purpose: hide the uv/pyproject project files so the worker's Python build falls
+# back to the slim root requirements.txt instead of installing the full ~654 MB
+# project from uv.lock (over Vercel's 500 MB limit). Neither the Next.js web app
+# nor the worker needs these at build time.
+#
+# DO NOT add source directories here (e.g. apps/web, apps/local) — they get
+# stripped from EVERY project, which empties the web app's build and 404s it.
+# The worker's own function bundle is trimmed separately via excludeFiles in
+# vercel.json.
 uv.lock
 pyproject.toml
-
-# Not needed in the worker at runtime; keeps the upload small.
-.venv
-data
-test_data
-research.ipynb
-apps/web
-apps/local
-*.parquet
-*.csv
