@@ -1,0 +1,17 @@
+# Force Vercel's Python builder to install the slim root requirements.txt rather
+# than the full project. Vercel installs from uv.lock (or pyproject.toml) when
+# present — the whole locked stack (jupyter, pyarrow, scipy, scikit-learn,
+# matplotlib, tconnectsync) is ~654 MB, over the 500 MB limit. Hiding both makes
+# it fall back to requirements.txt (~130 MB).
+uv.lock
+pyproject.toml
+
+# Not needed in the worker at runtime; keeps the upload small.
+.venv
+data
+test_data
+research.ipynb
+apps/web
+apps/local
+*.parquet
+*.csv
