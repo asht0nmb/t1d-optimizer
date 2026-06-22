@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import types
 from http.server import BaseHTTPRequestHandler
@@ -16,6 +17,33 @@ _WEB_VERCEL = _REPO_ROOT / "apps" / "web" / "vercel.json"
 _LEGACY_HANDLER = _REPO_ROOT / "apps" / "cron_worker" / "api" / "meal_rise_cron.py"
 _WEB_HANDLER = _REPO_ROOT / "apps" / "web" / "api" / "meal_rise_cron.py"
 _NON_STANDARD_HANDLER = _REPO_ROOT / "api" / "meal_rise_cron.py"
+_ROOT_REQUIREMENTS = _REPO_ROOT / "requirements.txt"
+_VERCELIGNORE = _REPO_ROOT / ".vercelignore"
+
+# Heavy deps the worker must NOT install on Vercel: they push the bundle past the
+# 500 MB limit and nothing at runtime needs them (pure pandas/numpy + psycopg2 +
+# pydexcom). The full set lands only if Vercel installs from uv.lock/pyproject.
+_HEAVY_FORBIDDEN = (
+    "pyarrow",
+    "scipy",
+    "scikit-learn",
+    "jupyter",
+    "matplotlib",
+    "tconnectsync",
+    "streamlit",
+    "plotly",
+)
+
+
+def _requirement_names(text: str) -> list[str]:
+    """Package names (lowercased, without version specifiers/comments)."""
+    names = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        names.append(re.split(r"[<>=!~ \[]", line)[0].strip().lower())
+    return names
 
 
 def _load_cron_handler_module():
@@ -98,3 +126,30 @@ def test_root_vercel_json_excludes_web_from_python_bundle():
 
 def test_no_meal_rise_handler_under_apps_web():
     assert not _WEB_HANDLER.is_file()
+
+
+def test_root_requirements_exists_and_is_slim():
+    # Vercel's Python builder installs the FULL project from uv.lock (~654 MB,
+    # over the 500 MB limit) unless a root requirements.txt is present, in which
+    # case it installs that. It must be slim — the heavy data/ML stack is not
+    # used at runtime.
+    assert _ROOT_REQUIREMENTS.is_file(), "root requirements.txt is required for the Vercel worker"
+    names = _requirement_names(_ROOT_REQUIREMENTS.read_text(encoding="utf-8"))
+    for pkg in _HEAVY_FORBIDDEN:
+        assert pkg not in names, f"{pkg} must not be in the worker requirements.txt"
+    joined = " ".join(names)
+    for needed in ("pandas", "numpy", "psycopg2", "pydexcom"):
+        assert needed in joined, f"{needed} missing from worker requirements.txt"
+
+
+def test_vercelignore_hides_uv_lock_and_pyproject():
+    # Without hiding these, Vercel installs from uv.lock/pyproject.toml (the full
+    # project) instead of the slim requirements.txt.
+    assert _VERCELIGNORE.is_file(), ".vercelignore is required to force the slim install"
+    entries = {
+        ln.strip()
+        for ln in _VERCELIGNORE.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    }
+    assert "uv.lock" in entries
+    assert "pyproject.toml" in entries

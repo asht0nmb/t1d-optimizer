@@ -1,0 +1,17 @@
+# Vercel cron-worker runtime deps ONLY (root-level so Vercel's Python builder
+# installs this instead of the full project from uv.lock/pyproject.toml, which is
+# ~654 MB and exceeds Vercel's 500 MB limit). Local/CI use uv + pyproject.toml +
+# uv.lock and ignore this file; .vercelignore hides uv.lock/pyproject.toml from
+# the Vercel build so this file wins.
+#
+# Keep in sync with apps/cron_worker/requirements.txt. The worker needs none of
+# the heavy stack: no parquet engine (it reads Supabase), no ML/stats libs
+# (core.detection v2 + core.metrics are pure pandas/numpy), no Tandem client
+# (pydexcom only).
+pandas==3.0.1
+numpy==2.4.3
+psycopg2-binary==2.9.12
+pydexcom==0.5.1
+python-dotenv==1.2.2
+pyyaml==6.0.3
+requests==2.32.5
