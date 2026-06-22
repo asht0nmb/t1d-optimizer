@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import { useCallback, useEffect, useState } from "react";
 import type { StatusResponse } from "@/lib/types/api";
@@ -17,7 +18,7 @@ export default function StatusPage() {
     setLoading(true);
     setError(null);
     try {
-      const body = await fetch("/api/status").then((r) => r.json());
+      const body = await fetchJson<StatusResponse>("/api/status");
       if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {

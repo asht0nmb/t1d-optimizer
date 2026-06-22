@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import { useCallback, useEffect, useState } from "react";
 import { subDays, format } from "date-fns";
@@ -19,9 +20,7 @@ export default function HeatmapPage() {
     setLoading(true);
     setError(null);
     try {
-      const config = (await fetch("/api/config").then((r) =>
-        r.json(),
-      )) as ConfigResponse;
+      const config = (await fetchJson("/api/config")) as ConfigResponse;
       setTargets(config.bg_targets);
       const to = config.date_bounds?.max_date ?? format(new Date(), "yyyy-MM-dd");
       const fromCandidate = format(subDays(new Date(to), 30), "yyyy-MM-dd");
@@ -30,9 +29,7 @@ export default function HeatmapPage() {
           ? config.date_bounds.min_date
           : fromCandidate
         : fromCandidate;
-      const heatmap = await fetch(`/api/heatmap?from=${from}&to=${to}`).then((r) =>
-        r.json(),
-      );
+      const heatmap = await fetchJson<HeatmapResponse>(`/api/heatmap?from=${from}&to=${to}`);
       if (heatmap.error) setError(heatmap.error);
       else setData(heatmap);
     } catch (e) {

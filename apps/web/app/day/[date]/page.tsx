@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { DayChart } from "@/components/DayChart";
 import type { DayViewResponse } from "@/lib/types/api";
+import { fetchJson } from "@/lib/fetch-json";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/error-state";
@@ -20,9 +21,8 @@ export default function DayPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/day/${date}`);
-      const body = await res.json();
-      if (!res.ok) setError(body.error ?? "Failed to load");
+      const body = await fetchJson<DayViewResponse>(`/api/day/${date}`);
+      if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");

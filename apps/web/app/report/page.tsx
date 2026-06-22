@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import { useCallback, useEffect, useState } from "react";
 import type { CgmReportResponse } from "@/lib/types/api";
@@ -21,7 +22,7 @@ export default function ReportPage() {
     setLoading(true);
     setError(null);
     try {
-      const body = await fetch(`/api/report?days=${days}`).then((r) => r.json());
+      const body = await fetchJson<CgmReportResponse>(`/api/report?days=${days}`);
       if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {

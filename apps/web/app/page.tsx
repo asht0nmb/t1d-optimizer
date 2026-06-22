@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -51,9 +52,9 @@ export default function HomePage() {
     setError(null);
     try {
       const [trends, status, alerts] = await Promise.all([
-        fetch("/api/trends?days=7").then((r) => r.json()),
-        fetch("/api/status").then((r) => r.json()),
-        fetch("/api/alerts?page=1&page_size=5").then((r) => r.json()),
+        fetchJson<TrendsResponse>("/api/trends?days=7"),
+        fetchJson<StatusResponse>("/api/status"),
+        fetchJson<AlertsResponse>("/api/alerts?page=1&page_size=5"),
       ]);
       const firstError = trends.error ?? status.error ?? alerts.error;
       if (firstError) {

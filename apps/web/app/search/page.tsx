@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import type { SearchResponse } from "@/lib/types/api";
+import { fetchJson } from "@/lib/fetch-json";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -23,9 +24,8 @@ export default function SearchPage() {
       const params = new URLSearchParams({ page: String(page), page_size: "30" });
       if (tirBelow) params.set("tir_below", tirBelow);
       if (alarmsAbove) params.set("alarms_above", alarmsAbove);
-      const res = await fetch(`/api/search?${params}`);
-      const body = await res.json();
-      if (!res.ok) setError(body.error ?? "Search failed");
+      const body = await fetchJson<SearchResponse>(`/api/search?${params}`);
+      if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Search failed");
