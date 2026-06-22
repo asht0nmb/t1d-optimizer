@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -27,7 +28,7 @@ export default function InsulinPage() {
     setLoading(true);
     setError(null);
     try {
-      const body = await fetch("/api/insulin?days=30").then((r) => r.json());
+      const body = await fetchJson<InsulinResponse>("/api/insulin?days=30");
       if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {

@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import { useCallback, useEffect, useState } from "react";
 import { CompareChart } from "@/components/CompareChart";
@@ -39,9 +40,7 @@ export default function ComparePage() {
     setLoading(true);
     setError(null);
     try {
-      const body = await fetch(`/api/compare?a=${dateA}&b=${dateB}`).then((r) =>
-        r.json(),
-      );
+      const body = await fetchJson<CompareResponse>(`/api/compare?a=${dateA}&b=${dateB}`);
       if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {

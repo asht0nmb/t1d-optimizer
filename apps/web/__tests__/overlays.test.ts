@@ -1,11 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
   clipIntervalToWindow,
+  siteIssueEndTs,
   snapIntervalToTimestamps,
 } from "@/lib/overlays";
 
 const W_START = "2026-06-10T00:00:00.000Z";
 const W_END = "2026-06-11T00:00:00.000Z";
+
+describe("siteIssueEndTs", () => {
+  it("uses last_occlusion_ts when present", () => {
+    expect(siteIssueEndTs("2026-06-10T03:00:00Z", "2026-06-10T05:00:00Z")).toBe(
+      "2026-06-10T05:00:00Z",
+    );
+  });
+
+  it("falls back to one hour after onset when there is no explicit end", () => {
+    expect(siteIssueEndTs("2026-06-10T03:00:00.000Z", null)).toBe(
+      "2026-06-10T04:00:00.000Z",
+    );
+  });
+
+  it("returns null (never throws) for a missing/invalid onset with no end", () => {
+    expect(siteIssueEndTs("", null)).toBeNull();
+    expect(siteIssueEndTs("not-a-date", null)).toBeNull();
+  });
+});
 
 describe("clipIntervalToWindow", () => {
   it("keeps an interval fully inside the window", () => {

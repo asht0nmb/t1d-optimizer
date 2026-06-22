@@ -1,8 +1,26 @@
 /** Pure interval helpers for day-view overlay shading (CGM gaps, site issues). */
 
+const HOUR_MS = 60 * 60 * 1000;
+
 export interface IsoInterval {
   start: string;
   end: string;
+}
+
+/**
+ * End timestamp for a site-issue overlay: the explicit ``last_occlusion_ts``,
+ * else one hour after onset. Returns null when there is no explicit end and the
+ * onset can't be parsed, so a malformed row is skipped instead of crashing the
+ * chart — `new Date(NaN).toISOString()` throws a RangeError.
+ */
+export function siteIssueEndTs(
+  first: string,
+  last: string | null,
+): string | null {
+  if (last) return last;
+  const firstMs = Date.parse(first);
+  if (!Number.isFinite(firstMs)) return null;
+  return new Date(firstMs + HOUR_MS).toISOString();
 }
 
 /** Clip [start, end) to [windowStart, windowEnd); null when there is no overlap. */

@@ -1,4 +1,5 @@
 "use client";
+import { fetchJson } from "@/lib/fetch-json";
 
 import { useCallback, useEffect, useState } from "react";
 import { TrendsChart } from "@/components/TrendsChart";
@@ -19,7 +20,7 @@ export default function TrendsPage() {
     setLoading(true);
     setError(null);
     try {
-      const body = await fetch(`/api/trends?days=${days}`).then((r) => r.json());
+      const body = await fetchJson<TrendsResponse>(`/api/trends?days=${days}`);
       if (body.error) setError(body.error);
       else setData(body);
     } catch (e) {
