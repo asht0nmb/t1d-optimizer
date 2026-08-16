@@ -7,7 +7,11 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from tconnectsync.eventparser.events import LidPumpingResumed, LidPumpingSuspended
+from tconnectsync.eventparser.events import (
+    LidAlarmActivated,
+    LidPumpingResumed,
+    LidPumpingSuspended,
+)
 
 from ingestion.builders import build_suspension_df
 
@@ -32,6 +36,17 @@ def _suspend(dt: datetime, reason_raw: int = 0, insulin: int = 200) -> MagicMock
 def _resume(dt: datetime) -> MagicMock:
     e = MagicMock(spec=LidPumpingResumed)
     e.eventTimestamp = _ts(dt)
+    return e
+
+
+def _alarm(dt: datetime, alarm_id_raw: int, alarm_name: str, seq: int) -> MagicMock:
+    e = MagicMock(spec=LidAlarmActivated)
+    e.eventTimestamp = _ts(dt)
+    e.alarmIdRaw = alarm_id_raw
+    e.seqNum = seq
+    aid = MagicMock()
+    aid.name = alarm_name
+    e.alarmId = aid
     return e
 
 
@@ -106,3 +121,41 @@ class TestSuspensionEdgeCases:
     def test_empty_events(self):
         df = build_suspension_df([], SERIAL)
         assert df.empty
+
+    def test_alarm_collision_at_same_timestamp_picks_lower_seqnum(self):
+        """Real-world case (DATA_ISSUES.md #3, 2026-03-19): the pump fires
+        the causal alarm (e.g. BatteryShutdownAlarm) and a companion
+        ResumePumpAlarm2 at the exact same wall-clock second, one seqnum
+        apart -- ResumePumpAlarm2 always fires second. A timestamp-keyed
+        dict that just takes "whichever alarm was seen last" can silently
+        report the companion alarm as the cause instead of the real one.
+        The lower seqnum (first to fire) must win."""
+        t0 = datetime(2026, 3, 19, 8, 6, 18, tzinfo=PST)
+        t1 = t0 + timedelta(minutes=10)
+        events = [
+            _alarm(t0, alarm_id_raw=12, alarm_name="BatteryShutdownAlarm", seq=281768),
+            _alarm(t0, alarm_id_raw=23, alarm_name="ResumePumpAlarm2", seq=281769),
+            _suspend(t0, reason_raw=1),
+            _resume(t1),
+        ]
+        df = build_suspension_df(events, SERIAL)
+        assert len(df) == 1
+        assert df.iloc[0]["alarm_id"] == 12
+        assert df.iloc[0]["alarm_name"] == "BatteryShutdownAlarm"
+
+    def test_alarm_collision_order_independent(self):
+        """Same scenario as above but with the alarm events listed in the
+        opposite order -- the lower-seqnum alarm must still win regardless
+        of iteration order, since the old bug was purely last-write-wins."""
+        t0 = datetime(2026, 3, 19, 22, 36, 35, tzinfo=PST)
+        t1 = t0 + timedelta(minutes=5)
+        events = [
+            _alarm(t0, alarm_id_raw=23, alarm_name="ResumePumpAlarm2", seq=283549),
+            _alarm(t0, alarm_id_raw=2, alarm_name="OcclusionAlarm", seq=283548),
+            _suspend(t0, reason_raw=1),
+            _resume(t1),
+        ]
+        df = build_suspension_df(events, SERIAL)
+        assert len(df) == 1
+        assert df.iloc[0]["alarm_id"] == 2
+        assert df.iloc[0]["alarm_name"] == "OcclusionAlarm"
