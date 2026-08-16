@@ -27,7 +27,7 @@ export function CompareChart({ data }: { data: CompareResponse }) {
   return (
     <ResponsiveContainer width="100%" height={360}>
       <LineChart data={rows}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
         <XAxis
           dataKey="minute"
           type="number"
