@@ -24,11 +24,21 @@ class ParsedCommand:
         chat_id: The chat the update came from, as a string, or ``None``
             when the update has no message/chat (e.g. a non-message update).
         is_known: ``True`` when ``command`` is in :data:`KNOWN_COMMANDS`.
+        raw_text: The message's raw text, verbatim, whenever the update
+            carries one — set regardless of whether ``command`` matched
+            anything. ``None`` for non-text updates. Added (additive,
+            defaulted) for the research-branch LLM assistant
+            (``apps/personal/telegram/llm_assistant.py``): a free-text
+            question ("why was I high this afternoon?") has no ``command``
+            to dispatch on, so the handler needs the original text to hand
+            to the assistant. Every pre-existing caller that constructs
+            ``ParsedCommand`` without this field is unaffected.
     """
 
     command: str | None
     chat_id: str | None
     is_known: bool
+    raw_text: str | None = None
 
 
 def _extract_message(update: dict) -> dict | None:
@@ -55,7 +65,7 @@ def parse_update(update: dict) -> ParsedCommand:
     """Normalize a Telegram update into a :class:`ParsedCommand`."""
     message = _extract_message(update)
     if message is None:
-        return ParsedCommand(command=None, chat_id=None, is_known=False)
+        return ParsedCommand(command=None, chat_id=None, is_known=False, raw_text=None)
 
     chat = message.get("chat")
     chat_id = None
@@ -63,6 +73,9 @@ def parse_update(update: dict) -> ParsedCommand:
         chat_id = str(chat["id"])
 
     text = message.get("text")
+    raw_text = text if isinstance(text, str) else None
     command = _normalize_command(text) if isinstance(text, str) else None
     is_known = command in KNOWN_COMMANDS
-    return ParsedCommand(command=command, chat_id=chat_id, is_known=is_known)
+    return ParsedCommand(
+        command=command, chat_id=chat_id, is_known=is_known, raw_text=raw_text
+    )
