@@ -276,10 +276,12 @@ def _page_day_view(selected_day: date, view: ViewMode, low: float, high: float) 
         config=_PLOTLY_CONFIG,
         key="day_chart",
     )
-    with st.expander("Legend & hover guide", expanded=False):
+    with st.expander("Legend & hover guide", expanded=True):
         st.markdown(
-            "- **CGM** markers are color-coded: green = in range, "
-            "orange = high (>target), red = low or very high (>250).\n"
+            "- **CGM** markers are color- *and* shape-coded so range isn't "
+            "color-only: ● circle/green = in range, ▲ triangle-up/orange = "
+            "high (>target), ▲ triangle-up/red = very high (>250), "
+            "▼ triangle-down/red = low.\n"
             "- **Bolus** diamond size is proportional to units; carbs (orange dot) "
             "are matched to the bolus cluster.\n"
             "- **Gap** shading (gray): CGM signal-loss windows. In enriched view "
