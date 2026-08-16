@@ -45,6 +45,18 @@ ml = [
     "statsmodels>=0.14.6",
     "xgboost>=3.2.0",
 ]
+# Optional: the Anthropic SDK for apps/personal/telegram/llm_assistant.py
+# (research/2026-08-16 exploration branch — code-complete but unwired, no
+# live key). NOT in root requirements.txt: that file is the Vercel cron
+# worker's deploy bundle (api/index.py + api/telegram.py's production
+# path), and adding a dependency there changes what ships to the live
+# meal-rise alert loop. AnthropicLLMClient imports `anthropic` lazily
+# (inside its own method), so importing this module at all — even with
+# the package absent — never breaks anything that doesn't call it.
+# Install with `uv sync --group llm`.
+llm = [
+    "anthropic>=0.40.0",
+]
 
 [tool.vercel]
 entrypoint = "api.index:handler"
