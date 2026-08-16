@@ -42,12 +42,12 @@ def _alarm_activated(dt, alarm_id_raw=10, alarm_name="SomeAlarm",
                      param1=1.0, param2=2.0, seq=100):
     e = MagicMock(spec=LidAlarmActivated)
     e.eventTimestamp = _ts(dt)
-    e.alarmidRaw = alarm_id_raw
+    e.alarmIdRaw = alarm_id_raw
     e.seqNum = seq
-    # Use a mock for alarmid that has a .name attribute
+    # Use a mock for alarmId that has a .name attribute
     aid = MagicMock()
     aid.name = alarm_name
-    e.alarmid = aid
+    e.alarmId = aid
     e.param1 = param1
     e.param2 = param2
     return e
@@ -56,11 +56,11 @@ def _alarm_activated(dt, alarm_id_raw=10, alarm_name="SomeAlarm",
 def _alarm_cleared(dt, alarm_id_raw=10, alarm_name="SomeAlarm", seq=101):
     e = MagicMock(spec=LidAlarmCleared)
     e.eventTimestamp = _ts(dt)
-    e.alarmidRaw = alarm_id_raw
+    e.alarmIdRaw = alarm_id_raw
     e.seqNum = seq
     aid = MagicMock()
     aid.name = alarm_name
-    e.alarmid = aid
+    e.alarmId = aid
     # Cleared events have no param1/param2
     del e.param1
     del e.param2
@@ -71,11 +71,11 @@ def _alert_activated(dt, alert_id_raw=30, alert_name="SomeAlert",
                      param1=3.0, param2=4.0, seq=200):
     e = MagicMock(spec=LidAlertActivated)
     e.eventTimestamp = _ts(dt)
-    e.alertidRaw = alert_id_raw
+    e.alertIdRaw = alert_id_raw
     e.seqNum = seq
     aid = MagicMock()
     aid.name = alert_name
-    e.alertid = aid
+    e.alertId = aid
     e.param1 = param1
     e.param2 = param2
     return e
@@ -84,11 +84,11 @@ def _alert_activated(dt, alert_id_raw=30, alert_name="SomeAlert",
 def _alert_cleared(dt, alert_id_raw=30, alert_name="SomeAlert", seq=201):
     e = MagicMock(spec=LidAlertCleared)
     e.eventTimestamp = _ts(dt)
-    e.alertidRaw = alert_id_raw
+    e.alertIdRaw = alert_id_raw
     e.seqNum = seq
     aid = MagicMock()
     aid.name = alert_name
-    e.alertid = aid
+    e.alertId = aid
     del e.param1
     del e.param2
     return e
@@ -98,8 +98,8 @@ def _cgm_alert_activated(dt, dalert_id_raw=2, dalert_id=None,
                           param1=5.0, param2=6.0, seq=300):
     e = MagicMock(spec=LidCgmAlertActivatedDex)
     e.eventTimestamp = _ts(dt)
-    e.dalertidRaw = dalert_id_raw
-    e.dalertid = dalert_id
+    e.dalertIdRaw = dalert_id_raw
+    e.dalertId = dalert_id
     e.param1 = param1
     e.param2 = param2
     e.seqNum = seq
@@ -109,8 +109,8 @@ def _cgm_alert_activated(dt, dalert_id_raw=2, dalert_id=None,
 def _cgm_alert_cleared(dt, dalert_id_raw=2, dalert_id=None, seq=301):
     e = MagicMock(spec=LidCgmAlertClearedDex)
     e.eventTimestamp = _ts(dt)
-    e.dalertidRaw = dalert_id_raw
-    e.dalertid = dalert_id
+    e.dalertIdRaw = dalert_id_raw
+    e.dalertId = dalert_id
     e.seqNum = seq
     del e.param1
     del e.param2
@@ -120,8 +120,8 @@ def _cgm_alert_cleared(dt, dalert_id_raw=2, dalert_id=None, seq=301):
 def _cgm_alert_ack(dt, dalert_id_raw=2, dalert_id=None, seq=302):
     e = MagicMock(spec=LidCgmAlertAckDex)
     e.eventTimestamp = _ts(dt)
-    e.dalertidRaw = dalert_id_raw
-    e.dalertid = dalert_id
+    e.dalertIdRaw = dalert_id_raw
+    e.dalertId = dalert_id
     e.seqNum = seq
     del e.param1
     del e.param2
