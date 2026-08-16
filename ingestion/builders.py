@@ -97,8 +97,8 @@ def build_cgm_df(events: list, pump_serial: str) -> pd.DataFrame:
     """Build CGM readings DataFrame from G7, Gxb, and FSL2 events.
 
     For backfilled readings (`cgmDataTypeRaw=2`) we use the sensor reading
-    time (`egvTimestamp`) as the primary timestamp since these readings
-    weren't available to the pump in real time. `egvTimestamp` is a raw
+    time (`egvTimeStamp`) as the primary timestamp since these readings
+    weren't available to the pump in real time. `egvTimeStamp` is a raw
     `int` (seconds since `TANDEM_EPOCH = 2008-01-01`), not a wrapper —
     decoded via `_decode_egv_timestamp`.
     """
@@ -109,7 +109,7 @@ def build_cgm_df(events: list, pump_serial: str) -> pd.DataFrame:
             is_backfill = data_type_raw == 2
             event_dt = e.eventTimestamp.datetime
 
-            egv_ts = getattr(e, 'egvTimestamp', None)
+            egv_ts = getattr(e, 'egvTimeStamp', None)
             sensor_dt = _decode_egv_timestamp(egv_ts, event_dt) if is_backfill else None
             if is_backfill and sensor_dt is not None:
                 timestamp = sensor_dt
@@ -121,7 +121,7 @@ def build_cgm_df(events: list, pump_serial: str) -> pd.DataFrame:
 
             rows.append({
                 "timestamp": timestamp,
-                "bg_mgdl": int(e.currentglucosedisplayvalue),
+                "bg_mgdl": int(e.currentGlucoseDisplayValue),
                 "backfilled": is_backfill,
                 "sensor_timestamp": sensor_timestamp,
                 "pump_serial": pump_serial,
@@ -151,8 +151,8 @@ def build_bolus_df(events: list, pump_serial: str) -> pd.DataFrame:
         if isinstance(e, LidBolusCompleted):
             rows.append({
                 "timestamp": e.eventTimestamp.datetime,
-                "insulin_units": float(e.insulindelivered),
-                "bolus_id": int(e.bolusid),
+                "insulin_units": float(e.insulinDelivered),
+                "bolus_id": int(e.bolusId),
                 "pump_serial": pump_serial,
             })
 
@@ -170,11 +170,11 @@ def _derive_bolus_source(msg2) -> str:
     """Derive bolus_source string from a LidBolusRequestedMsg2."""
     options_raw = msg2.optionsRaw
     if not isinstance(options_raw, int) or options_raw < 0 or options_raw > 7:
-        logger.warning("Unexpected optionsRaw value: %r for bolusid %s", options_raw, msg2.bolusid)
+        logger.warning("Unexpected optionsRaw value: %r for bolusid %s", options_raw, msg2.bolusId)
         return "unknown"
     if options_raw in (3, 6):
         return "auto"
-    if msg2.useroverrideRaw == 1:
+    if msg2.userOverrideRaw == 1:
         return "override"
     return "user"
 
@@ -187,11 +187,11 @@ def build_request_df(events: list, pump_serial: str) -> pd.DataFrame:
 
     for e in events:
         if isinstance(e, LidBolusRequestedMsg1):
-            msg1_by_id[e.bolusid] = e
+            msg1_by_id[e.bolusId] = e
         elif isinstance(e, LidBolusRequestedMsg2):
-            msg2_by_id[e.bolusid] = e
+            msg2_by_id[e.bolusId] = e
         elif isinstance(e, LidBolusRequestedMsg3):
-            msg3_by_id[e.bolusid] = e
+            msg3_by_id[e.bolusId] = e
 
     # Warn about orphaned Msg2/Msg3 (no matching Msg1)
     for bid in msg2_by_id:
@@ -214,14 +214,14 @@ def build_request_df(events: list, pump_serial: str) -> pd.DataFrame:
 
         rows.append({
             "timestamp": m1.eventTimestamp.datetime,
-            "bolus_id": int(m1.bolusid),
-            "carbs_g": int(m1.carbamount),
-            "bg_mgdl": int(m1.BG),
-            "iob": float(m1.IOB),
+            "bolus_id": int(m1.bolusId),
+            "carbs_g": int(m1.carbAmount),
+            "bg_mgdl": int(m1.bg),
+            "iob": float(m1.iob),
             "bolus_source": bolus_source,
-            "food_insulin": float(m3.foodbolussize) if m3 is not None else float("nan"),
-            "correction_insulin": float(m3.correctionbolussize) if m3 is not None else float("nan"),
-            "total_requested": float(m3.totalbolussize) if m3 is not None else float("nan"),
+            "food_insulin": float(m3.foodBolusSize) if m3 is not None else float("nan"),
+            "correction_insulin": float(m3.correctionBolusSize) if m3 is not None else float("nan"),
+            "total_requested": float(m3.totalBolusSize) if m3 is not None else float("nan"),
             "pump_serial": pump_serial,
         })
 
@@ -285,8 +285,8 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
     alarm_lookup: dict = {}
     for e in events:
         if isinstance(e, LidAlarmActivated):
-            name = e.alarmid.name if e.alarmid is not None else None
-            alarm_lookup[e.eventTimestamp.datetime] = (e.alarmidRaw, name)
+            name = e.alarmId.name if e.alarmId is not None else None
+            alarm_lookup[e.eventTimestamp.datetime] = (e.alarmIdRaw, name)
 
     # Gather and sort all suspend + resume events by timestamp
     sus_events = []
@@ -297,7 +297,7 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
 
     def _alarm_fields(suspend_event):
         """Return alarm_id and alarm_name for a suspend event."""
-        reason = _SUSPEND_REASON_MAP.get(suspend_event.suspendreasonRaw, "unknown")
+        reason = _SUSPEND_REASON_MAP.get(suspend_event.suspendReasonRaw, "unknown")
         if reason == "alarm":
             ts = suspend_event.eventTimestamp.datetime
             if ts in alarm_lookup:
@@ -321,9 +321,9 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
                     "resume_timestamp": resume_ts,
                     "duration_minutes": dur,
                     "suspend_reason": _SUSPEND_REASON_MAP.get(
-                        current_suspend.suspendreasonRaw, "unknown"
+                        current_suspend.suspendReasonRaw, "unknown"
                     ),
-                    "insulin_at_suspend": int(current_suspend.insulinamount),
+                    "insulin_at_suspend": int(current_suspend.insulinAmount),
                     "pairing_suspect": True,
                     "pump_serial": pump_serial,
                     "alarm_id": a_id,
@@ -345,9 +345,9 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
                 "resume_timestamp": resume_ts,
                 "duration_minutes": dur,
                 "suspend_reason": _SUSPEND_REASON_MAP.get(
-                    current_suspend.suspendreasonRaw, "unknown"
+                    current_suspend.suspendReasonRaw, "unknown"
                 ),
-                "insulin_at_suspend": int(current_suspend.insulinamount),
+                "insulin_at_suspend": int(current_suspend.insulinAmount),
                 "pairing_suspect": pairing_suspect,
                 "pump_serial": pump_serial,
                 "alarm_id": a_id,
@@ -363,9 +363,9 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
             "resume_timestamp": pd.NaT,
             "duration_minutes": float("nan"),
             "suspend_reason": _SUSPEND_REASON_MAP.get(
-                current_suspend.suspendreasonRaw, "unknown"
+                current_suspend.suspendReasonRaw, "unknown"
             ),
-            "insulin_at_suspend": int(current_suspend.insulinamount),
+            "insulin_at_suspend": int(current_suspend.insulinAmount),
             "pairing_suspect": False,
             "pump_serial": pump_serial,
             "alarm_id": a_id,
@@ -401,7 +401,7 @@ def _build_event_row(e, pump_serial: str) -> dict | None:
             "event_type": "site_change",
             "event_subtype": "cartridge",
             "previous_mode": None,
-            "details": json.dumps({"insulin_volume": e.insulinvolume}),
+            "details": json.dumps({"insulin_volume": e.insulinVolume}),
             "seqnum": int(e.seqNum),
             "pump_serial": pump_serial,
         }
@@ -412,7 +412,7 @@ def _build_event_row(e, pump_serial: str) -> dict | None:
             "event_type": "site_change",
             "event_subtype": "cannula",
             "previous_mode": None,
-            "details": json.dumps({"prime_size": e.primesize}),
+            "details": json.dumps({"prime_size": e.primeSize}),
             "seqnum": int(e.seqNum),
             "pump_serial": pump_serial,
         }
@@ -423,7 +423,7 @@ def _build_event_row(e, pump_serial: str) -> dict | None:
             "event_type": "site_change",
             "event_subtype": "tubing",
             "previous_mode": None,
-            "details": json.dumps({"prime_size": e.primesize}),
+            "details": json.dumps({"prime_size": e.primeSize}),
             "seqnum": int(e.seqNum),
             "pump_serial": pump_serial,
         }
@@ -451,29 +451,29 @@ def _build_event_row(e, pump_serial: str) -> dict | None:
         }
 
     if isinstance(e, LidAaUserModeChange):
-        current_raw = e.currentusermodeRaw
-        previous_raw = e.previoususermodeRaw
+        current_raw = e.currentUserModeRaw
+        previous_raw = e.previousUserModeRaw
         return {
             "timestamp": e.eventTimestamp.datetime,
             "event_type": "mode_change",
             "event_subtype": _USER_MODE_MAP.get(current_raw, f"unknown_{current_raw}"),
             "previous_mode": _USER_MODE_MAP.get(previous_raw, f"unknown_{previous_raw}"),
             "details": json.dumps({
-                "requested_action": e.requestedactionRaw,
-                "exercise_time": e.exercisetime,
+                "requested_action": e.requestedActionRaw,
+                "exercise_time": e.exerciseTime,
             }),
             "seqnum": int(e.seqNum),
             "pump_serial": pump_serial,
         }
 
     if isinstance(e, LidAaPcmChange):
-        current_raw = e.currentpcmRaw
+        current_raw = e.currentPcmRaw
         return {
             "timestamp": e.eventTimestamp.datetime,
             "event_type": "pcm_change",
             "event_subtype": _PCM_MAP.get(current_raw, f"unknown_{current_raw}"),
             "previous_mode": None,
-            "details": json.dumps({"previous_pcm": e.previouspcmRaw}),
+            "details": json.dumps({"previous_pcm": e.previousPcmRaw}),
             "seqnum": int(e.seqNum),
             "pump_serial": pump_serial,
         }
@@ -484,7 +484,7 @@ def _build_event_row(e, pump_serial: str) -> dict | None:
             "event_type": "daily_marker",
             "event_subtype": "new_day",
             "previous_mode": None,
-            "details": json.dumps({"commanded_basal_rate": e.commandedbasalrate}),
+            "details": json.dumps({"commanded_basal_rate": e.commandedBasalRate}),
             "seqnum": int(e.seqNum),
             "pump_serial": pump_serial,
         }
@@ -496,7 +496,7 @@ def _build_event_row(e, pump_serial: str) -> dict | None:
             "event_subtype": "daily_status",
             "previous_mode": None,
             "details": json.dumps({
-                "pump_control_state": e.pumpcontrolstateRaw,
+                "pump_control_state": e.pumpControlStateRaw,
                 "user_mode": e.usermodeRaw,
             }),
             "seqnum": int(e.seqNum),
@@ -551,16 +551,16 @@ def build_alarm_df(events: list, pump_serial: str) -> pd.DataFrame:
         if isinstance(e, (LidAlarmActivated, LidAlarmCleared)):
             category = "alarm"
             action = "activated" if isinstance(e, LidAlarmActivated) else "cleared"
-            alarm_id = int(e.alarmidRaw)
-            alarm_name = e.alarmid.name if e.alarmid else f"alarm_{alarm_id}"
+            alarm_id = int(e.alarmIdRaw)
+            alarm_name = e.alarmId.name if e.alarmId else f"alarm_{alarm_id}"
             p1 = float(e.param1) if hasattr(e, "param1") else float("nan")
             p2 = float(e.param2) if hasattr(e, "param2") else float("nan")
 
         elif isinstance(e, (LidAlertActivated, LidAlertCleared)):
             category = "alert"
             action = "activated" if isinstance(e, LidAlertActivated) else "cleared"
-            alarm_id = int(e.alertidRaw)
-            raw_name = e.alertid.name if e.alertid else f"alert_{alarm_id}"
+            alarm_id = int(e.alertIdRaw)
+            raw_name = e.alertId.name if e.alertId else f"alert_{alarm_id}"
             alarm_name = _ALERT_NAME_OVERRIDES.get(alarm_id, raw_name)
             p1 = float(e.param1) if hasattr(e, "param1") else float("nan")
             p2 = float(e.param2) if hasattr(e, "param2") else float("nan")
@@ -573,8 +573,8 @@ def build_alarm_df(events: list, pump_serial: str) -> pd.DataFrame:
                 action = "cleared"
             else:
                 action = "ack"
-            alarm_id = int(e.dalertidRaw)
-            alarm_name = _CGM_DALERT_MAP.get(alarm_id, str(e.dalertid) if e.dalertid is not None else f"unknown_{alarm_id}")
+            alarm_id = int(e.dalertIdRaw)
+            alarm_name = _CGM_DALERT_MAP.get(alarm_id, str(e.dalertId) if e.dalertId is not None else f"unknown_{alarm_id}")
             p1 = float(e.param1) if hasattr(e, "param1") else float("nan")
             p2 = float(e.param2) if hasattr(e, "param2") else float("nan")
 

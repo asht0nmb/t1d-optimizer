@@ -24,8 +24,8 @@ def _ts(dt: datetime):
 def _suspend(dt: datetime, reason_raw: int = 0, insulin: int = 200) -> MagicMock:
     e = MagicMock(spec=LidPumpingSuspended)
     e.eventTimestamp = _ts(dt)
-    e.suspendreasonRaw = reason_raw
-    e.insulinamount = insulin
+    e.suspendReasonRaw = reason_raw
+    e.insulinAmount = insulin
     return e
 
 
