@@ -56,6 +56,22 @@ def _bg_band(val: float, low: float, high: float) -> tuple[str, str]:
     return C_GREEN, "in range"
 
 
+def _bg_symbol(band: str) -> str:
+    """Marker shape for a BG band, independent of color.
+
+    Range is color-coded (green/orange/red) above; that alone is a
+    colorblind-accessibility gap for a chart whose whole point is flagging
+    highs/lows, so direction is also shape-coded: a plain circle in range,
+    an upward triangle for any above-target reading ("high"/"very high"),
+    and a downward triangle for any below-target reading ("low").
+    """
+    if band in ("high", "very high"):
+        return "triangle-up"
+    if band == "low":
+        return "triangle-down"
+    return "circle"
+
+
 def _bolus_category(cluster: dict, requests: pd.DataFrame) -> str | None:
     if requests.empty or "bolus_category" not in requests.columns:
         return None
@@ -223,13 +239,17 @@ def _add_cgm_panel(fig: go.Figure, day: DaySlice, *, row: int, x1: datetime) -> 
         row=row, col=1,
     )
 
-    # Range-colored markers with rich hover.
+    # Range-colored, shape-coded markers with rich hover. Shape (circle /
+    # triangle-up / triangle-down) repeats the color signal so range isn't
+    # conveyed by color alone.
     colors: list[str] = []
     bands: list[str] = []
+    symbols: list[str] = []
     for v in bg_vals:
         c, b = _bg_band(float(v), day.low, day.high)
         colors.append(c)
         bands.append(b)
+        symbols.append(_bg_symbol(b))
     hover = [
         f"<b>{t.strftime('%H:%M')}</b><br>"
         f"{int(round(float(v)))} mg/dL · {b}"
@@ -242,6 +262,7 @@ def _add_cgm_panel(fig: go.Figure, day: DaySlice, *, row: int, x1: datetime) -> 
             mode="markers",
             marker=dict(
                 color=colors,
+                symbol=symbols,
                 size=5,
                 line=dict(width=0),
             ),
