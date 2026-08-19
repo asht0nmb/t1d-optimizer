@@ -56,6 +56,10 @@ export default function StatusPage() {
             </p>
             <div className="mt-3 overflow-x-auto rounded-lg border border-border">
               <table className="w-full text-sm">
+                <caption className="sr-only">
+                  Automation signal status: last-seen time, freshness, and
+                  detail for each signal
+                </caption>
                 <thead>
                   <tr className="border-b border-border text-left text-muted-foreground">
                     <th className="p-3 font-medium">Signal</th>

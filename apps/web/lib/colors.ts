@@ -22,3 +22,34 @@ export function bgSegmentColor(
   if (bg > high) return colors.orange;
   return colors.green;
 }
+
+export type BgSegmentKind = "low" | "high" | "in-range";
+
+/**
+ * Direction relative to the target band, independent of severity. Used to
+ * pick a marker *shape* (in addition to `bgSegmentColor`'s hue) so out-of-
+ * range CGM points aren't distinguished by color alone — colorblind users
+ * get "above/below target" from the shape even if the color is ambiguous.
+ */
+export function bgSegmentKind(bg: number, low: number, high: number): BgSegmentKind {
+  if (bg < low) return "low";
+  if (bg > high) return "high";
+  return "in-range";
+}
+
+/**
+ * SVG polygon `points` for an upward- or downward-pointing triangle marker
+ * centered at (cx, cy) with "radius" r, matching the footprint of a circle
+ * dot of the same r so the two shapes read as the same size on the chart.
+ */
+export function triangleDotPoints(
+  cx: number,
+  cy: number,
+  r: number,
+  direction: "up" | "down",
+): string {
+  if (direction === "up") {
+    return `${cx},${cy - r} ${cx + r},${cy + r} ${cx - r},${cy + r}`;
+  }
+  return `${cx - r},${cy - r} ${cx + r},${cy - r} ${cx},${cy + r}`;
+}
