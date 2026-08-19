@@ -21,9 +21,26 @@ helper, tightening types without changing output) do **not** bump.
 
 from __future__ import annotations
 
-PIPELINE_VERSION: int = 3
+PIPELINE_VERSION: int = 4
 
 PIPELINE_VERSION_CHANGELOG: dict[int, str] = {
+    4: (
+        "Migrated from tconnectsync v2 (reportsfacade byte-level decode) to "
+        "v3 (Tandem Source BFF JSON API) after Tandem's 2026-06-30 breaking "
+        "API change — a structurally different transport and decode path, "
+        "invalidating the 'same bytes in, same decode' assumption behind "
+        "prior parquets. Separately: v3 renamed the raw CGM sensor-time "
+        "field from `egvTimestamp` (v2, lowercase s) to `egvTimeStamp` "
+        "(capital S); our getattr(e, 'egvTimestamp', None) lookup used the "
+        "old casing, which under v3 always misses and returns None, "
+        "silently regressing backfilled-CGM `timestamp` back to v1-era "
+        "pump-reconnect-time semantics instead of v3's documented sensor-"
+        "time semantics. Confirmed via the cached v2.3.4 source that this "
+        "casing was correct pre-migration, so no previously-synced data was "
+        "affected by this specific defect — the fix (use `egvTimeStamp`) "
+        "restores PIPELINE_VERSION 3's intended behavior going forward "
+        "under the new dependency."
+    ),
     1: (
         "Initial tconnectsync ingestion. Backfilled CGM rows were stamped "
         "with `eventTimestamp` (pump-received burst time), causing all "
