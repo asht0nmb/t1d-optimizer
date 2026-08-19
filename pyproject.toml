@@ -19,6 +19,15 @@ dependencies = [
     "tconnectsync>=3.0.0",
 ]
 
+[tool.uv]
+# tconnectsync 3.0.x pins PyJWT==2.8.0 exactly, which would otherwise
+# downgrade us from the already-patched 2.12.1 and reintroduce a fixed
+# PyJWT CVE (crit-header validation) into the OIDC login flow tconnectsync
+# uses against Tandem's identity provider. Force the patched version;
+# PyJWT 2.x is backward compatible for the basic decode/encode usage
+# tconnectsync needs. Found during the 2026-08-16 security review.
+override-dependencies = ["pyjwt>=2.12.1"]
+
 [tool.pytest.ini_options]
 addopts = "-m 'not legacy and not integration'"
 markers = [

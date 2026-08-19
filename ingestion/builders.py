@@ -281,12 +281,25 @@ _SUSPEND_REASON_MAP = {
 
 def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
     """Build suspension episode DataFrame by pairing suspend/resume events."""
-    # Build alarm lookup: timestamp → (alarmidRaw, alarm_name)
+    # Build alarm lookup: timestamp → (alarmIdRaw, alarm_name) of the
+    # lowest-seqnum (first-fired) alarm at that instant. Multiple alarms can
+    # share an exact timestamp -- e.g. a causal alarm (BatteryShutdownAlarm,
+    # OcclusionAlarm, ...) is reliably followed one seqnum later by a
+    # companion ResumePumpAlarm2 at the identical second (verified against
+    # real data, DATA_ISSUES.md #3). Keying by timestamp alone and
+    # overwriting on every match silently reports whichever alarm happens to
+    # be last in iteration order -- in practice always the companion alarm,
+    # never the actual cause. The lowest seqnum is the first alarm the pump
+    # fired, which is the causal one.
     alarm_lookup: dict = {}
     for e in events:
         if isinstance(e, LidAlarmActivated):
+            ts = e.eventTimestamp.datetime
+            existing = alarm_lookup.get(ts)
+            if existing is not None and existing[0] <= e.seqNum:
+                continue
             name = e.alarmId.name if e.alarmId is not None else None
-            alarm_lookup[e.eventTimestamp.datetime] = (e.alarmIdRaw, name)
+            alarm_lookup[ts] = (e.seqNum, e.alarmIdRaw, name)
 
     # Gather and sort all suspend + resume events by timestamp
     sus_events = []
@@ -301,7 +314,7 @@ def build_suspension_df(events: list, pump_serial: str) -> pd.DataFrame:
         if reason == "alarm":
             ts = suspend_event.eventTimestamp.datetime
             if ts in alarm_lookup:
-                aid, aname = alarm_lookup[ts]
+                _seq, aid, aname = alarm_lookup[ts]
                 return aid, aname
         return float("nan"), None
 
