@@ -20,14 +20,40 @@ def get_api() -> TandemSourceApi:
 
 
 def get_pump_metadata(api: TandemSourceApi) -> list[dict]:
-    """Return metadata for all pumps on the account, sorted oldest-first."""
-    metadata = api.pump_event_metadata()
-    return sorted(metadata, key=lambda p: p["minDateWithEvents"])
+    """Return metadata for all pumps on the account, sorted oldest-first.
+
+    tconnectsync v3 replaced pump_event_metadata() with get_pumper(), which
+    nests pumps under BffPumper.pumps and renames tconnectDeviceId ->
+    assignmentId (now a UUID string) and minDateWithEvents/maxDateWithEvents
+    -> availableDataRange.start/end. Normalize back to the legacy field
+    names here so every downstream caller (sync script, CI smoke test) is
+    unaffected by the upstream rename. Pumps with no data range (never
+    uploaded / retired) are skipped — there's nothing to sync for them, and
+    the legacy code path never had to handle a None minDateWithEvents.
+    """
+    pumper = api.get_pumper()
+    pumps = pumper.get("pumps") or []
+
+    normalized = []
+    for pump in pumps:
+        data_range = pump.get("availableDataRange") or {}
+        min_date = data_range.get("start")
+        max_date = data_range.get("end")
+        if not min_date or not max_date:
+            continue
+        normalized.append({
+            **pump,
+            "tconnectDeviceId": pump["assignmentId"],
+            "minDateWithEvents": min_date,
+            "maxDateWithEvents": max_date,
+        })
+
+    return sorted(normalized, key=lambda p: p["minDateWithEvents"])
 
 
 def fetch_pump_events(
     api: TandemSourceApi,
-    device_id: int,
+    device_id: str,
     start_date: str,
     end_date: str,
     pump_serial: str,
@@ -41,7 +67,8 @@ def fetch_pump_events(
 
     Args:
         api: Authenticated TandemSourceApi
-        device_id: tconnectDeviceId from pump_event_metadata()
+        device_id: tconnectDeviceId from get_pump_metadata() (a UUID string
+            under tconnectsync v3, an int under the retired v2 API)
         start_date: "YYYY-MM-DD"
         end_date: "YYYY-MM-DD"
         pump_serial: For logging only

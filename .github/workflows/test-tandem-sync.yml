@@ -41,6 +41,7 @@ jobs:
           # Values must be defined in repo Settings → Secrets and variables → Actions.
           TCONNECT_EMAIL: ${{ secrets.TCONNECT_EMAIL }}
           TCONNECT_PASSWORD: ${{ secrets.TCONNECT_PASSWORD }}
+          TIMEZONE_NAME: ${{ secrets.TIMEZONE_NAME }}
           # tconnectsync writes a `.creds_cache` file to cwd by default.
           # Disable that cache in CI so no credential material ever lands
           # on the runner filesystem.

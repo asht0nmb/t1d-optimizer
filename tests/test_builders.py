@@ -53,18 +53,18 @@ def _ts(dt: datetime):
 def _cgm(dt: datetime, bg: int, seq: int = 0) -> MagicMock:
     e = MagicMock(spec=LidCgmDataG7)
     e.eventTimestamp = _ts(dt)
-    e.currentglucosedisplayvalue = bg
+    e.currentGlucoseDisplayValue = bg
     e.seqNum = seq
     e.cgmDataTypeRaw = 1
-    e.egvTimestamp = None
+    e.egvTimeStamp = None
     return e
 
 
-# tconnectsync's `egvTimestamp` is a raw UINT32 (`int # sec`) counted from
+# tconnectsync's `egvTimeStamp` is a raw UINT32 (`int # sec`) counted from
 # `TANDEM_EPOCH = 1199145600` (2008-01-01 UTC). The seconds are interpreted as
 # a *local-wall-clock* offset from that epoch (matching upstream's
 # `process_cgm_reading.timestamp_for`, which does `arrow.get(TANDEM_EPOCH +
-# egvTimestamp, tzinfo='UTC').replace(tzinfo=user_tz)` — i.e. components first,
+# egvTimeStamp, tzinfo='UTC').replace(tzinfo=user_tz)` — i.e. components first,
 # label after). The fixture below mirrors that contract so backfill tests
 # exercise the real upstream type instead of a fabricated `.datetime`-having
 # wrapper.
@@ -80,46 +80,46 @@ def _egv_seconds(dt_sensor: datetime) -> int:
 def _cgm_backfill(dt_event, dt_sensor, bg, seq=0, data_type_raw=2):
     e = MagicMock(spec=LidCgmDataG7)
     e.eventTimestamp = _ts(dt_event)
-    e.currentglucosedisplayvalue = bg
+    e.currentGlucoseDisplayValue = bg
     e.seqNum = seq
     e.cgmDataTypeRaw = data_type_raw
     # Real upstream type: a plain int, NOT a wrapper with `.datetime`.
-    e.egvTimestamp = _egv_seconds(dt_sensor)
+    e.egvTimeStamp = _egv_seconds(dt_sensor)
     return e
 
 
 def _bolus_completed(dt: datetime, insulin: float, bolus_id: int) -> MagicMock:
     e = MagicMock(spec=LidBolusCompleted)
     e.eventTimestamp = _ts(dt)
-    e.insulindelivered = insulin
-    e.bolusid = bolus_id
+    e.insulinDelivered = insulin
+    e.bolusId = bolus_id
     return e
 
 
 def _msg1(dt: datetime, bolus_id: int, carbs: int = 45, bg: int = 180, iob: float = 1.2) -> MagicMock:
     e = MagicMock(spec=LidBolusRequestedMsg1)
     e.eventTimestamp = _ts(dt)
-    e.bolusid = bolus_id
-    e.carbamount = carbs
-    e.BG = bg
-    e.IOB = iob
+    e.bolusId = bolus_id
+    e.carbAmount = carbs
+    e.bg = bg
+    e.iob = iob
     return e
 
 
 def _msg2(bolus_id: int, options_raw: int = 0, user_override: int = 0) -> MagicMock:
     e = MagicMock(spec=LidBolusRequestedMsg2)
-    e.bolusid = bolus_id
+    e.bolusId = bolus_id
     e.optionsRaw = options_raw
-    e.useroverrideRaw = user_override
+    e.userOverrideRaw = user_override
     return e
 
 
 def _msg3(bolus_id: int, food: float = 3.0, correction: float = 1.0, total: float = 4.0) -> MagicMock:
     e = MagicMock(spec=LidBolusRequestedMsg3)
-    e.bolusid = bolus_id
-    e.foodbolussize = food
-    e.correctionbolussize = correction
-    e.totalbolussize = total
+    e.bolusId = bolus_id
+    e.foodBolusSize = food
+    e.correctionBolusSize = correction
+    e.totalBolusSize = total
     return e
 
 
@@ -134,8 +134,8 @@ def _basal(dt: datetime, commanded_rate: int, source_raw: int = 3) -> MagicMock:
 def _suspend(dt: datetime, reason_raw: int = 0, insulin: int = 200) -> MagicMock:
     e = MagicMock(spec=LidPumpingSuspended)
     e.eventTimestamp = _ts(dt)
-    e.suspendreasonRaw = reason_raw
-    e.insulinamount = insulin
+    e.suspendReasonRaw = reason_raw
+    e.insulinAmount = insulin
     return e
 
 
@@ -148,19 +148,19 @@ def _resume(dt: datetime) -> MagicMock:
 def _alarm_activated(dt, alarm_id_raw, alarm_name="TestAlarm"):
     e = MagicMock(spec=LidAlarmActivated)
     e.eventTimestamp = _ts(dt)
-    e.alarmidRaw = alarm_id_raw
-    e.alarmid = MagicMock()
-    e.alarmid.name = alarm_name
+    e.alarmIdRaw = alarm_id_raw
+    e.alarmId = MagicMock()
+    e.alarmId.name = alarm_name
     return e
 
 
 def _mode_change(dt: datetime, current: int, previous: int, seq: int = 1) -> MagicMock:
     e = MagicMock(spec=LidAaUserModeChange)
     e.eventTimestamp = _ts(dt)
-    e.currentusermodeRaw = current
-    e.previoususermodeRaw = previous
-    e.requestedactionRaw = 0
-    e.exercisetime = 60
+    e.currentUserModeRaw = current
+    e.previousUserModeRaw = previous
+    e.requestedActionRaw = 0
+    e.exerciseTime = 60
     e.seqNum = seq
     return e
 
@@ -168,7 +168,7 @@ def _mode_change(dt: datetime, current: int, previous: int, seq: int = 1) -> Mag
 def _new_day(dt: datetime, basal_rate: float = 0.8, seq: int = 10) -> MagicMock:
     e = MagicMock(spec=LidNewDay)
     e.eventTimestamp = _ts(dt)
-    e.commandedbasalrate = basal_rate
+    e.commandedBasalRate = basal_rate
     e.seqNum = seq
     return e
 
@@ -176,7 +176,7 @@ def _new_day(dt: datetime, basal_rate: float = 0.8, seq: int = 10) -> MagicMock:
 def _cannula(dt: datetime, prime: float = 0.3, seq: int = 20) -> MagicMock:
     e = MagicMock(spec=LidCannulaFilled)
     e.eventTimestamp = _ts(dt)
-    e.primesize = prime
+    e.primeSize = prime
     e.seqNum = seq
     return e
 
@@ -310,16 +310,16 @@ class TestBuildCgmDf:
         assert df.iloc[0]["sensor_timestamp"] == dt_event
 
     def test_backfill_int_egvtimestamp_zero_falls_back_to_event_time(self):
-        """A zero (or missing) egvTimestamp on a backfilled row is sentinel
+        """A zero (or missing) egvTimeStamp on a backfilled row is sentinel
         for "no sensor time available"; we must fall back to eventTimestamp
         rather than emitting 2008-01-01 garbage."""
         dt_event = datetime(2026, 3, 20, 12, 3, 16, tzinfo=PST)
         e = MagicMock(spec=LidCgmDataG7)
         e.eventTimestamp = _ts(dt_event)
-        e.currentglucosedisplayvalue = 200
+        e.currentGlucoseDisplayValue = 200
         e.seqNum = 100
         e.cgmDataTypeRaw = 2
-        e.egvTimestamp = 0
+        e.egvTimeStamp = 0
         df = build_cgm_df([e], SERIAL)
         assert df.iloc[0]["timestamp"] == dt_event
 

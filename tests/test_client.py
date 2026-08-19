@@ -22,28 +22,43 @@ def fake_api():
 
 
 @pytest.fixture
-def unsorted_pump_metadata():
-    """Three pump dicts in a non-chronological order."""
-    return [
-        {
-            "serialNumber": "B_MIDDLE",
-            "tconnectDeviceId": 2,
-            "minDateWithEvents": "2024-06-01T00:00:00",
-            "maxDateWithEvents": "2024-12-31T00:00:00",
-        },
-        {
-            "serialNumber": "C_NEWEST",
-            "tconnectDeviceId": 3,
-            "minDateWithEvents": "2025-01-15T00:00:00",
-            "maxDateWithEvents": "2026-03-01T00:00:00",
-        },
-        {
-            "serialNumber": "A_OLDEST",
-            "tconnectDeviceId": 1,
-            "minDateWithEvents": "2023-02-10T00:00:00",
-            "maxDateWithEvents": "2024-05-20T00:00:00",
-        },
-    ]
+def bff_pumper_response():
+    """A get_pumper() response (tconnectsync v3 BFF shape): three pumps in
+    non-chronological order, plus one never-uploaded pump with no data
+    range."""
+    return {
+        "pumps": [
+            {
+                "assignmentId": "uuid-b-middle",
+                "serialNumber": "B_MIDDLE",
+                "availableDataRange": {
+                    "start": "2024-06-01T00:00:00",
+                    "end": "2024-12-31T00:00:00",
+                },
+            },
+            {
+                "assignmentId": "uuid-c-newest",
+                "serialNumber": "C_NEWEST",
+                "availableDataRange": {
+                    "start": "2025-01-15T00:00:00",
+                    "end": "2026-03-01T00:00:00",
+                },
+            },
+            {
+                "assignmentId": "uuid-a-oldest",
+                "serialNumber": "A_OLDEST",
+                "availableDataRange": {
+                    "start": "2023-02-10T00:00:00",
+                    "end": "2024-05-20T00:00:00",
+                },
+            },
+            {
+                "assignmentId": "uuid-never-uploaded",
+                "serialNumber": "D_NEVER_UPLOADED",
+                "availableDataRange": {"start": None, "end": None},
+            },
+        ]
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -92,25 +107,57 @@ class TestGetApi:
 
 
 class TestGetPumpMetadata:
-    def test_returns_pumps_sorted_oldest_first(self, fake_api, unsorted_pump_metadata):
-        fake_api.pump_event_metadata.return_value = unsorted_pump_metadata
+    def test_returns_pumps_sorted_oldest_first(self, fake_api, bff_pumper_response):
+        fake_api.get_pumper.return_value = bff_pumper_response
 
         result = client.get_pump_metadata(fake_api)
 
         serials = [p["serialNumber"] for p in result]
         assert serials == ["A_OLDEST", "B_MIDDLE", "C_NEWEST"]
 
-    def test_calls_pump_event_metadata_once(self, fake_api, unsorted_pump_metadata):
-        fake_api.pump_event_metadata.return_value = unsorted_pump_metadata
+    def test_calls_get_pumper_once(self, fake_api, bff_pumper_response):
+        fake_api.get_pumper.return_value = bff_pumper_response
 
         client.get_pump_metadata(fake_api)
 
-        fake_api.pump_event_metadata.assert_called_once_with()
+        fake_api.get_pumper.assert_called_once_with()
 
     def test_empty_metadata_returns_empty_list(self, fake_api):
-        fake_api.pump_event_metadata.return_value = []
+        fake_api.get_pumper.return_value = {"pumps": []}
 
         assert client.get_pump_metadata(fake_api) == []
+
+    def test_missing_pumps_key_returns_empty_list(self, fake_api):
+        fake_api.get_pumper.return_value = {}
+
+        assert client.get_pump_metadata(fake_api) == []
+
+    def test_normalizes_v3_field_names_to_legacy_names(self, fake_api, bff_pumper_response):
+        """v3's get_pumper() nests pumps and renames tconnectDeviceId ->
+        assignmentId, minDateWithEvents/maxDateWithEvents ->
+        availableDataRange.start/end. Downstream callers (sync script, CI
+        smoke test) still expect the legacy field names, so get_pump_metadata
+        must translate."""
+        fake_api.get_pumper.return_value = bff_pumper_response
+
+        result = client.get_pump_metadata(fake_api)
+
+        oldest = next(p for p in result if p["serialNumber"] == "A_OLDEST")
+        assert oldest["tconnectDeviceId"] == "uuid-a-oldest"
+        assert oldest["minDateWithEvents"] == "2023-02-10T00:00:00"
+        assert oldest["maxDateWithEvents"] == "2024-05-20T00:00:00"
+
+    def test_skips_pumps_with_no_data_range(self, fake_api, bff_pumper_response):
+        """A never-uploaded/retired pump has availableDataRange.start/end ==
+        None — there's nothing to sync for it, and the legacy code path never
+        had to handle a None minDateWithEvents, so skip it defensively."""
+        fake_api.get_pumper.return_value = bff_pumper_response
+
+        result = client.get_pump_metadata(fake_api)
+
+        serials = [p["serialNumber"] for p in result]
+        assert "D_NEVER_UPLOADED" not in serials
+        assert len(result) == 3
 
 
 # ---------------------------------------------------------------------------
