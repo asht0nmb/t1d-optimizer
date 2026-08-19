@@ -14,7 +14,7 @@ import {
   YAxis,
 } from "recharts";
 import type { DayViewResponse } from "@/lib/types/api";
-import { bgSegmentColor, colors } from "@/lib/colors";
+import { bgSegmentColor, bgSegmentKind, colors, triangleDotPoints } from "@/lib/colors";
 import { dayWindowUtc } from "@/lib/dates";
 import {
   clipIntervalToWindow,
@@ -133,7 +133,7 @@ export function DayChart({ data }: { data: DayViewResponse }) {
       <Panel title="CGM">
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={cgmRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
             <XAxis {...sharedXAxis} />
             <YAxis domain={[40, 420]} tick={{ fontSize: 11 }} />
             {gaps.map((a, i) => (
@@ -172,6 +172,33 @@ export function DayChart({ data }: { data: DayViewResponse }) {
                   return <g key={key} />;
                 }
                 const fill = bgSegmentColor(payload.bg, low, high);
+                const kind = bgSegmentKind(payload.bg, low, high);
+                const stroke = payload.backfilled ? "#90A4AE" : fill;
+                const dashArray = payload.backfilled ? "2 2" : undefined;
+                // Out-of-range points are shape-coded (▲ high, ▼ low), not
+                // color-only — colorblind users can still read direction.
+                if (kind === "high") {
+                  return (
+                    <polygon
+                      key={key}
+                      points={triangleDotPoints(cx, cy, 4, "up")}
+                      fill={fill}
+                      stroke={stroke}
+                      strokeDasharray={dashArray}
+                    />
+                  );
+                }
+                if (kind === "low") {
+                  return (
+                    <polygon
+                      key={key}
+                      points={triangleDotPoints(cx, cy, 4, "down")}
+                      fill={fill}
+                      stroke={stroke}
+                      strokeDasharray={dashArray}
+                    />
+                  );
+                }
                 return (
                   <circle
                     key={key}
@@ -179,8 +206,8 @@ export function DayChart({ data }: { data: DayViewResponse }) {
                     cy={cy}
                     r={3}
                     fill={fill}
-                    stroke={payload.backfilled ? "#90A4AE" : fill}
-                    strokeDasharray={payload.backfilled ? "2 2" : undefined}
+                    stroke={stroke}
+                    strokeDasharray={dashArray}
                   />
                 );
               }}
@@ -189,12 +216,13 @@ export function DayChart({ data }: { data: DayViewResponse }) {
             />
           </ComposedChart>
         </ResponsiveContainer>
+        <CgmLegend />
       </Panel>
 
       <Panel title="Bolus">
         <ResponsiveContainer width="100%" height={140}>
           <ComposedChart data={bolusRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
             <XAxis {...sharedXAxis} />
             <YAxis tick={{ fontSize: 11 }} />
             <Tooltip
@@ -209,7 +237,7 @@ export function DayChart({ data }: { data: DayViewResponse }) {
       <Panel title="Basal rate (U/hr)">
         <ResponsiveContainer width="100%" height={140}>
           <ComposedChart data={basalRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
             <XAxis {...sharedXAxis} />
             <YAxis tick={{ fontSize: 11 }} />
             <Tooltip
@@ -229,7 +257,7 @@ export function DayChart({ data }: { data: DayViewResponse }) {
 
       {(data.alarms.length > 0 || data.cgm_gaps.length > 0) && (
         <Panel title="Events">
-          <ul className="max-h-40 space-y-1 overflow-y-auto text-sm text-slate-700">
+          <ul className="max-h-40 space-y-1 overflow-y-auto text-sm text-foreground">
             {data.alarms.map((a, i) => (
               <li key={`a-${i}`}>
                 {formatMinutesLabel(minutesSinceMidnight(a.timestamp))} —{" "}
@@ -237,7 +265,7 @@ export function DayChart({ data }: { data: DayViewResponse }) {
               </li>
             ))}
             {data.cgm_gaps.map((g, i) => (
-              <li key={`g-${i}`} className="text-slate-500">
+              <li key={`g-${i}`} className="text-muted-foreground">
                 CGM gap {formatMinutesLabel(minutesSinceMidnight(g.start_ts))}
                 {g.end_ts
                   ? ` → ${formatMinutesLabel(minutesSinceMidnight(g.end_ts))}`
@@ -251,19 +279,87 @@ export function DayChart({ data }: { data: DayViewResponse }) {
   );
 }
 
+/**
+ * Text+shape key for the CGM panel's marker encoding, so range is never
+ * conveyed by color alone (mirrors HeatmapGrid's sr-only scale note and
+ * TimeInBandsBar's swatch+label list).
+ */
+function CgmLegend() {
+  const items: {
+    key: string;
+    label: string;
+    swatch: React.ReactNode;
+  }[] = [
+    {
+      key: "in-range",
+      label: "In range",
+      swatch: (
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <circle cx="5" cy="5" r="4" fill={colors.green} />
+        </svg>
+      ),
+    },
+    {
+      key: "high",
+      label: "High",
+      swatch: (
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <polygon points="5,1 9,9 1,9" fill={colors.orange} />
+        </svg>
+      ),
+    },
+    {
+      key: "low",
+      label: "Low",
+      swatch: (
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <polygon points="1,1 9,1 5,9" fill={colors.red} />
+        </svg>
+      ),
+    },
+    {
+      key: "backfilled",
+      label: "Backfilled",
+      swatch: (
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <circle
+            cx="5"
+            cy="5"
+            r="4"
+            fill="none"
+            stroke="#90A4AE"
+            strokeDasharray="2 1.5"
+          />
+        </svg>
+      ),
+    },
+  ];
+
+  return (
+    <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+      {items.map((item) => (
+        <li key={item.key} className="flex items-center gap-1.5">
+          {item.swatch}
+          <span>{item.label}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3">
-      <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="text-lg font-semibold text-slate-900">{value}</p>
+    <div className="rounded-lg border border-border bg-card px-4 py-3">
+      <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="text-lg font-semibold text-foreground">{value}</p>
     </div>
   );
 }
 
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-      <h2 className="mb-3 text-sm font-semibold text-slate-800">{title}</h2>
+    <section className="rounded-lg border border-border bg-card p-4 shadow-sm">
+      <h2 className="mb-3 text-sm font-semibold text-foreground">{title}</h2>
       {children}
     </section>
   );

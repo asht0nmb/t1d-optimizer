@@ -61,6 +61,10 @@ export default function AlertsPage() {
               {data.total} alerts (page {data.page} of {totalPages})
             </p>
             <table className="mt-3 w-full text-sm">
+              <caption className="sr-only">
+                Meal-rise alert history: when each alert fired, its kind,
+                delivery status, message, and pump serial
+              </caption>
               <thead>
                 <tr className="border-b border-border text-left text-muted-foreground">
                   <th className="py-2">Fired at</th>

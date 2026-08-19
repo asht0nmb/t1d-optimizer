@@ -47,7 +47,7 @@ export function TrendsChart({ data }: { data: TrendsResponse }) {
         onClick={goToDay}
         style={{ cursor: "pointer" }}
       >
-        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
         <XAxis dataKey="label" tick={{ fontSize: 11 }} />
         <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} unit="%" />
         <Tooltip

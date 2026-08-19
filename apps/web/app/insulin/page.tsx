@@ -68,7 +68,7 @@ export default function InsulinPage() {
           <Card className="p-4">
             <ResponsiveContainer width="100%" height={400}>
               <BarChart data={rows}>
-                <CartesianGrid strokeDasharray="3 3" />
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                 <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip />

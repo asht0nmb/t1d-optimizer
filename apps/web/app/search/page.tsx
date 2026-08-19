@@ -51,7 +51,7 @@ export default function SearchPage() {
               type="number"
               value={tirBelow}
               onChange={(e) => setTirBelow(e.target.value)}
-              className="mt-1 block w-24 rounded border border-border px-2 py-1"
+              className="mt-1 block w-24 rounded border border-input bg-card px-2 py-1 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </label>
           <label className="text-sm">
@@ -60,7 +60,7 @@ export default function SearchPage() {
               type="number"
               value={alarmsAbove}
               onChange={(e) => setAlarmsAbove(e.target.value)}
-              className="mt-1 block w-24 rounded border border-border px-2 py-1"
+              className="mt-1 block w-24 rounded border border-input bg-card px-2 py-1 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
               placeholder="optional"
             />
           </label>
@@ -88,6 +88,10 @@ export default function SearchPage() {
               {data.total} matching days (page {data.page})
             </p>
             <table className="mt-3 w-full text-sm">
+              <caption className="sr-only">
+                Days matching the search filters, with time-in-range,
+                alarm count, and low count
+              </caption>
               <thead>
                 <tr className="border-b border-border text-left text-muted-foreground">
                   <th className="py-2">Date</th>
@@ -115,7 +119,12 @@ export default function SearchPage() {
               </tbody>
             </table>
           </Card>
-        ) : null}
+        ) : (
+          <EmptyState
+            title="No search run yet"
+            description="Set your filters above and press Search."
+          />
+        )}
       </div>
     </div>
   );

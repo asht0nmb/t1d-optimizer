@@ -18,22 +18,24 @@ export default function ComparePage() {
   const [data, setData] = useState<CompareResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [configError, setConfigError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/config")
-      .then((r) => r.json() as Promise<ConfigResponse>)
-      .then((config) => {
-        const bounds = config.date_bounds;
-        if (!bounds) return;
-        setMinDate(bounds.min_date);
-        setMaxDate(bounds.max_date);
-        setDateA(bounds.max_date);
-        const prior = defaultCompareDate(bounds.max_date);
-        setDateB(prior < bounds.min_date ? bounds.min_date : prior);
-      })
-      .catch(() => {
-        // Keep hardcoded fallback when config endpoint is unavailable.
-      });
+    void fetchJson<ConfigResponse>("/api/config").then((config) => {
+      if (config.error) {
+        // Non-blocking: the hardcoded fallback dates below still render,
+        // but the user should know they're not the real latest bounds.
+        setConfigError(config.error);
+        return;
+      }
+      const bounds = config.date_bounds;
+      if (!bounds) return;
+      setMinDate(bounds.min_date);
+      setMaxDate(bounds.max_date);
+      setDateA(bounds.max_date);
+      const prior = defaultCompareDate(bounds.max_date);
+      setDateB(prior < bounds.min_date ? bounds.min_date : prior);
+    });
   }, []);
 
   const load = useCallback(async () => {
@@ -62,6 +64,15 @@ export default function ComparePage() {
   return (
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold">Compare days</h1>
+      {configError ? (
+        <div
+          role="status"
+          className="rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground"
+        >
+          Couldn&apos;t load date bounds ({configError}) — showing a fallback
+          date pair instead of the actual latest days.
+        </div>
+      ) : null}
       <div className="flex flex-wrap gap-4">
         <label className="text-sm">
           Day A
@@ -71,7 +82,7 @@ export default function ComparePage() {
             onChange={(e) => setDateA(e.target.value)}
             min={minDate}
             max={maxDate}
-            className="mt-1 block rounded border border-border px-2 py-1"
+            className="mt-1 block rounded border border-input bg-card px-2 py-1 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </label>
         <label className="text-sm">
@@ -82,7 +93,7 @@ export default function ComparePage() {
             onChange={(e) => setDateB(e.target.value)}
             min={minDate}
             max={maxDate}
-            className="mt-1 block rounded border border-border px-2 py-1"
+            className="mt-1 block rounded border border-input bg-card px-2 py-1 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </label>
       </div>
