@@ -327,6 +327,13 @@ def load_from_supabase(url: str, start: datetime, end: datetime
     pad_hi = end + timedelta(hours=4)  # correction_lookahead resolution window
     conn = psycopg2.connect(url)
     try:
+        # NEVER enable autocommit on this connection (neither via set_session
+        # nor the conn.autocommit attribute). Without autocommit psycopg2 emits
+        # per-transaction BEGIN READ ONLY; WITH autocommit it instead issues a
+        # session-level SET default_transaction_read_only = on, which on the
+        # transaction-mode pooler leaks onto a shared backend and breaks the
+        # live worker's writes (incident 2026-10-14). Enforced by
+        # tests/test_no_pooler_session_leak.py.
         conn.set_session(readonly=True)
         with conn.cursor() as cur:
             cur.execute(
