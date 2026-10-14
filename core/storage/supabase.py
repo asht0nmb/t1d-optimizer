@@ -29,6 +29,11 @@ Connection-pool ergonomics:
   durable against a network blip mid-load).
 * No long-lived transactions; the only "open" transaction is the one
   Postgres opens implicitly for the duration of a single SQL statement.
+* Every non-autocommit connection is switched to explicit
+  ``BEGIN READ WRITE`` transactions at construction (client-side flag only,
+  no session-level SET), so a ``default_transaction_read_only = on`` leaked
+  onto a shared pooler backend by another client cannot break writes. See
+  :func:`_force_read_write_transactions`.
 
 Type-precision trade-off: Postgres ``numeric(p,s)`` columns come back
 as :class:`decimal.Decimal`; this implementation casts them to ``float``
@@ -50,6 +55,7 @@ import pandas as pd
 
 try:  # psycopg2 is a runtime dep; raise a clear error if it isn't installed.
     import psycopg2  # type: ignore[import-not-found]
+    import psycopg2.extensions  # type: ignore[import-not-found]
     from psycopg2.extras import (  # type: ignore[import-not-found]
         Json,
         RealDictCursor,
@@ -165,6 +171,39 @@ def _rows_to_dataframe(
     return pd.DataFrame(normalized)
 
 
+def _force_read_write_transactions(conn: Any) -> None:
+    """Make every transaction on ``conn`` start ``BEGIN READ WRITE``.
+
+    Defence against a leaked session-level
+    ``default_transaction_read_only = on`` on a shared transaction-mode
+    pooler backend (incident 2026-10-14; see
+    ``docs/updates/2026-10-14-pooler-session-leak.md``). Verified against
+    psycopg2 2.9.x source: on a NON-autocommit connection
+    ``set_session(readonly=False)`` sends no SQL — it only records the flag —
+    and ``pq_begin_locked`` then opens each transaction with
+    ``BEGIN READ WRITE``, which overrides the session default. Reads are
+    covered too (they run in the same READ WRITE transactions), so no
+    separate read-path guard is needed.
+
+    Deliberately skipped:
+
+    * autocommit connections — there psycopg2 would implement this as a
+      session-level ``SET default_transaction_read_only``, i.e. the very
+      kind of pooler session state we must never create. The only
+      autocommit caller (``scripts/sync_tandem_to_supabase.py``) uses the
+      DIRECT connection, whose backend is not shared with other clients.
+    * closed connections, or ones handed over mid-transaction (psycopg2
+      raises if session characteristics change inside a transaction).
+    """
+    if getattr(conn, "autocommit", False):
+        return
+    if getattr(conn, "closed", 0):
+        return
+    if getattr(conn, "status", None) != psycopg2.extensions.STATUS_READY:
+        return
+    conn.set_session(readonly=False)
+
+
 class SupabaseStorage:
     """Postgres-backed :class:`Storage` implementation."""
 
@@ -185,6 +224,7 @@ class SupabaseStorage:
             )
         self._conn = conn
         self._owns_conn = False
+        _force_read_write_transactions(conn)
 
     @classmethod
     def from_pooler_url(cls, url: str) -> "SupabaseStorage":
