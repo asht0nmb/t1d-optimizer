@@ -176,28 +176,53 @@ class RedactingFormatter(logging.Formatter):
         return redact(super().formatException(ei))
 
 
+def _scrub_record(record: logging.LogRecord) -> None:
+    """Redact a record's message, args, traceback text and stack info in place."""
+    try:
+        record.msg = redact(record.getMessage())
+        record.args = None
+    except Exception:  # noqa: BLE001 - never let logging raise
+        record.msg = _SECRET_TOKEN
+        record.args = None
+    if record.exc_info and not record.exc_text:
+        try:
+            record.exc_text = redact(
+                "".join(traceback.format_exception(*record.exc_info)).rstrip("\n")
+            )
+        except Exception:  # noqa: BLE001
+            record.exc_text = _SECRET_TOKEN
+    elif record.exc_text:
+        record.exc_text = redact(record.exc_text)
+    if record.stack_info:
+        record.stack_info = redact(record.stack_info)
+
+
 class RedactingFilter(logging.Filter):
     """Rewrite a record's message, args and cached traceback text in place."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            record.msg = redact(record.getMessage())
-            record.args = None
-        except Exception:  # noqa: BLE001 - never let logging raise
-            record.msg = _SECRET_TOKEN
-            record.args = None
-        if record.exc_info and not record.exc_text:
-            try:
-                record.exc_text = redact(
-                    "".join(traceback.format_exception(*record.exc_info)).rstrip("\n")
-                )
-            except Exception:  # noqa: BLE001
-                record.exc_text = _SECRET_TOKEN
-        elif record.exc_text:
-            record.exc_text = redact(record.exc_text)
-        if record.stack_info:
-            record.stack_info = redact(record.stack_info)
+        _scrub_record(record)
         return True
+
+
+def _install_record_factory() -> None:
+    """Scrub every record at creation, whatever logger/handler later emits it.
+
+    This is the catch-all for loggers created after ``install_redaction`` with
+    ``propagate=False`` and their own (unwrapped) handler: the record is
+    already redacted before any handler sees it. Idempotent.
+    """
+    previous = logging.getLogRecordFactory()
+    if getattr(previous, "_redacting", False):
+        return
+
+    def factory(*args, **kwargs):
+        record = previous(*args, **kwargs)
+        _scrub_record(record)
+        return record
+
+    factory._redacting = True  # type: ignore[attr-defined]
+    logging.setLogRecordFactory(factory)
 
 
 def _harden_handler(handler: logging.Handler) -> None:
@@ -213,8 +238,13 @@ def _harden_handler(handler: logging.Handler) -> None:
 def install_redaction() -> None:
     """Harden every handler on the root logger and every named logger.
 
-    Idempotent. Call again after anything that may add handlers.
+    Idempotent. Call again after anything that may add handlers (after login
+    and after the metadata fetch). Also installs a record factory so a logger
+    created later with its own handler is still redacted, and routes
+    ``warnings.warn`` output through the (redacting) logging handlers.
     """
+    _install_record_factory()
+    logging.captureWarnings(True)
     loggers: list[logging.Logger] = [logging.getLogger()]
     loggers += [
         lg

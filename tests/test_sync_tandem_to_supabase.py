@@ -648,3 +648,35 @@ class TestRedactionWiring:
         monkeypatch.setattr(sync, "run_sync", lambda **k: 0)
         assert sync.main(["--dry-run"]) == 0
         assert called.get("ok") is True
+
+
+class TestPerPumpIsolation:
+    def test_crash_in_one_pump_does_not_abort_the_rest(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_OLD1", "2024-01-01", 1),
+            _pump_with_upload("SN_NEW1", "2026-10-13", 1),
+        ]
+        patched_sync.fetch_pump_events.side_effect = [
+            RuntimeError("boom"),
+            FetchResult([MagicMock()], "2026-10-12", chunks_total=1),
+        ]
+        # Active pump (second) has a CGM gap: its alert must still go out.
+        patched_sync.build_all.return_value = _cgm_basal_dfs([], [30, 0])
+
+        assert sync.run_sync(dry_run=False) != 0
+
+        serials = [c.args[0] for c in patched_sync.storage.set_fetch_state.call_args_list]
+        assert serials == ["SN_NEW1"]
+        patched_sync.send_telegram.assert_called_once()
+        assert "G7" in patched_sync.send_telegram.call_args.args[0]
+        patched_sync.mock_conn.close.assert_called_once()
+
+    def test_crash_log_is_redacted_and_exit_nonzero(self, patched_sync, caplog):
+        patched_sync.get_pump_metadata.return_value = [
+            _make_pump("SN_SECRET_12345678", 1, "2023-01-01", "2024-06-30")
+        ]
+        patched_sync.fetch_pump_events.side_effect = RuntimeError("boom SN_SECRET_12345678")
+        assert sync.run_sync(dry_run=False) != 0
+        formatter = redaction.RedactingFormatter("%(message)s")
+        for rec in caplog.records:
+            assert "SN_SECRET_12345678" not in formatter.format(rec)

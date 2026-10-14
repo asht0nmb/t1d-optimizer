@@ -431,3 +431,75 @@ class TestTconnectsyncLoggerLevel:
         finally:
             ts.setLevel(old)
         assert seen["level_at_login"] >= logging.WARNING
+
+
+# ---------------------------------------------------------------------------
+# Hardening: warnings capture + late-created loggers
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureWarnings:
+    def test_warning_text_is_redacted(self):
+        import warnings
+
+        stream = io.StringIO()
+        root = logging.getLogger()
+        old_handlers, old_level = root.handlers[:], root.level
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                redaction.register_serial(SERIAL)
+                redaction.configure_logging(stream=stream)
+                warnings.warn(f"deprecated thing for {SERIAL} id {UUID_A}")
+        finally:
+            logging.captureWarnings(False)
+            root.handlers = old_handlers
+            root.setLevel(old_level)
+            sys.excepthook = sys.__excepthook__
+        out = stream.getvalue()
+        assert "deprecated thing" in out
+        assert SERIAL not in out
+        assert UUID_A not in out
+
+
+class TestLateCreatedLoggers:
+    def test_late_logger_with_own_handler_is_redacted(self, stream_logger):
+        # Created AFTER install_redaction, propagate=False, plain handler.
+        buf = io.StringIO()
+        lg = logging.getLogger("late.created.logger")
+        lg.propagate = False
+        lg.setLevel(logging.INFO)
+        h = logging.StreamHandler(buf)
+        h.setFormatter(logging.Formatter("%(message)s"))
+        lg.addHandler(h)
+        redaction.register_serial(SERIAL)
+        try:
+            lg.info("serial %s uuid %s", SERIAL, UUID_A)
+            try:
+                raise RuntimeError(f"boom {UUID_B} {SERIAL}")
+            except RuntimeError:
+                lg.error("failed", exc_info=True)
+        finally:
+            lg.removeHandler(h)
+        out = buf.getvalue()
+        assert "Traceback" in out
+        assert SERIAL not in out
+        assert UUID_A not in out and UUID_B not in out
+
+    def test_reharden_wraps_late_handler(self, stream_logger):
+        buf = io.StringIO()
+        lg = logging.getLogger("late.created.logger2")
+        lg.propagate = False
+        h = logging.StreamHandler(buf)
+        lg.addHandler(h)
+        try:
+            redaction.install_redaction()
+            assert isinstance(h.formatter, redaction.RedactingFormatter)
+        finally:
+            lg.removeHandler(h)
+
+    def test_install_is_idempotent_for_record_factory(self, stream_logger):
+        before = logging.getLogRecordFactory()
+        redaction.install_redaction()
+        redaction.install_redaction()
+        assert logging.getLogRecordFactory() is before

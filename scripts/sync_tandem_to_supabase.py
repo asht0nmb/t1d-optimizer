@@ -363,6 +363,7 @@ def run_sync(
         logger.error("Authentication failed: %s", type(exc).__name__)
         return 1
     redaction.protect_identifiers(api=api)
+    redaction.install_redaction()  # re-harden anything added during login
 
     try:
         metadata = get_pump_metadata(api)
@@ -370,6 +371,7 @@ def run_sync(
         logger.error("pump_event_metadata failed: %s", type(exc).__name__)
         return 1
     redaction.protect_identifiers(metadata=metadata)
+    redaction.install_redaction()  # re-harden anything added during the fetch
 
     # The "active" pump is the one with the latest data. Chosen before the
     # --only filter so a targeted run still evaluates the right pump.
@@ -418,18 +420,25 @@ def run_sync(
     gap_alerts: list[HealthAlert] = []
     try:
         for pump in metadata:
-            result = process_pump(
-                api,
-                pump,
-                storage,
-                config,
-                dry_run=dry_run,
-                verbose=verbose,
-                start_override=start,
-                end_override=end,
-                is_active=pump is active_pump,
-                health=health,
-            )
+            # One pump crashing must not skip the others or the CGM-gap
+            # alerts; it still forces a non-zero exit.
+            try:
+                result = process_pump(
+                    api,
+                    pump,
+                    storage,
+                    config,
+                    dry_run=dry_run,
+                    verbose=verbose,
+                    start_override=start,
+                    end_override=end,
+                    is_active=pump is active_pump,
+                    health=health,
+                )
+            except Exception:
+                logger.exception("Pump %s: sync failed", _mask_serial(pump["serialNumber"]))
+                exit_code = 1
+                continue
             processed_any = processed_any or result.processed
             chunks_failed += result.chunks_failed
             gap_alerts.extend(result.alerts)

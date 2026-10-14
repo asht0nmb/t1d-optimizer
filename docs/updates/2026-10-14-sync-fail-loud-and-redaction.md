@@ -36,7 +36,9 @@ The nightly Action reported green every night while syncing nothing:
    first chunk fails, the previous bookmark is kept (never dropped, which would
    cause a full-history refetch) and the bookmark never moves backward.
 3. **Fail loud.** `run_sync` exits 1 if any chunk failed for any pump, after
-   persisting everything that succeeded. `scripts/ci_tandem_smoke.py` exits 1
+   persisting everything that succeeded. A crash inside one pump's processing
+   is also isolated: the remaining pumps and the CGM-gap alert still run, and
+   the exit is still 1. `scripts/ci_tandem_smoke.py` exits 1
    on zero events or any failed chunk.
 4. **Data-staleness alerts** (Telegram, sent from Python, text built only from
    durations - no serials, UUIDs or names):
@@ -59,7 +61,11 @@ The nightly Action reported green every night while syncing nothing:
      and the account holder's first/last/full name (read from the login claims
      and `get_pumper()` at runtime, never hardcoded);
    - applied to the formatted message, record args, and traceback text; uncaught
-     exceptions go through a redacting `sys.excepthook`.
+     exceptions go through a redacting `sys.excepthook`. `warnings.warn` output
+     is routed through the same handlers (`logging.captureWarnings`), and a
+     process-wide log-record factory scrubs every record at creation, so a logger
+     created later with `propagate=False` and its own handler is still covered.
+     Handlers are also re-hardened after login and after the metadata fetch.
    - **Primary control for the login JWT line:** the `tconnectsync` logger is
      held at WARNING or higher (set before login in `get_api()` and in both
      entrypoints), because login happens before any value is known. Value and
@@ -119,7 +125,7 @@ typed model `SyncHealthConfig` is `AppConfig.sync_health` in
 
 ## Verification
 
-- Full pytest: 877 passed (baseline 749); new tests cover bookmark
+- Full pytest: 886 passed (baseline 749); new tests cover bookmark
   contiguity, fail-loud exit codes, staleness/CGM-gap checks, Telegram sending
   (mocked), redaction (message, args, traceback, names, JWTs, logger level),
   workflow hygiene and the repair-script CLI.

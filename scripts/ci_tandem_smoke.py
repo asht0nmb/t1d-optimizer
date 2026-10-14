@@ -103,6 +103,7 @@ def main() -> int:
         return 1
     logger.info("Authentication succeeded.")
     redaction.protect_identifiers(api=api)
+    redaction.install_redaction()  # re-harden anything added during login
 
     try:
         metadata = get_pump_metadata(api)
@@ -111,6 +112,7 @@ def main() -> int:
         return 1
 
     redaction.protect_identifiers(metadata=metadata)
+    redaction.install_redaction()
 
     if not metadata:
         logger.error("No pumps found on account; nothing to fetch.")
