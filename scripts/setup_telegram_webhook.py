@@ -7,6 +7,7 @@ and ``TELEGRAM_WEBHOOK_SECRET`` from ``.env``.
     uv run python scripts/setup_telegram_webhook.py register [--url URL]
     uv run python scripts/setup_telegram_webhook.py verify [--live-test]
     uv run python scripts/setup_telegram_webhook.py delete
+    uv run python scripts/setup_telegram_webhook.py print-env NAME | <secret store>
 
 Secrets are only ever sent in HTTPS request bodies/headers or the Telegram
 Bot API URL path (which is how Telegram authenticates the bot). They are
@@ -18,6 +19,8 @@ errors are reported by exception class only.
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -32,6 +35,7 @@ DEFAULT_WORKER_URL = "https://t1d-optimizer-meal-bot.vercel.app/api/telegram"
 SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 TIMEOUT = 15
 API = "https://api.telegram.org"
+PRINTABLE = {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET"}
 
 
 def _load(env_path: Path) -> dict[str, str]:
@@ -70,16 +74,37 @@ def _fake_update(chat_id: str, text: str = "/help") -> dict:
 
 
 def cmd_gen_secret(env_path: Path) -> int:
-    if _load(env_path).get("TELEGRAM_WEBHOOK_SECRET"):
-        print("TELEGRAM_WEBHOOK_SECRET already present in .env; leaving it unchanged.")
+    key = "TELEGRAM_WEBHOOK_SECRET"
+    if _load(env_path).get(key):
+        print(f"{key} already present in .env; leaving it unchanged.")
         return 0
-    existing = env_path.read_text() if env_path.exists() else ""
-    prefix = "" if not existing or existing.endswith("\n") else "\n"
     # token_urlsafe emits only A-Z a-z 0-9 _ - ; 48 bytes -> 64 chars (limit 256).
-    value = secrets.token_urlsafe(48)
-    with env_path.open("a") as fh:
-        fh.write(f"{prefix}TELEGRAM_WEBHOOK_SECRET={value}\n")
-    print(f"Appended TELEGRAM_WEBHOOK_SECRET to {env_path.name} (value not shown).")
+    line = f"{key}={secrets.token_urlsafe(48)}"
+    if not env_path.exists():
+        fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(line + "\n")
+    else:
+        existing = env_path.read_text()
+        # An existing but empty key (`KEY=`, `KEY=''`, `export KEY=`) is
+        # replaced in place so .env never ends up with a duplicate key.
+        pattern = re.compile(rf"^(\s*export\s+)?{key}\s*=.*$", re.MULTILINE)
+        if pattern.search(existing):
+            updated = pattern.sub(lambda m: (m.group(1) or "") + line, existing, count=1)
+        else:
+            updated = existing + ("" if not existing or existing.endswith("\n") else "\n") + line + "\n"
+        env_path.write_text(updated)
+    print(f"Wrote {key} to {env_path.name} (value not shown).")
+    return 0
+
+
+def cmd_print_env(env_path: Path, name: str) -> int:
+    """Write the raw parsed value of NAME to stdout, no newline. For piping only."""
+    value = _load(env_path).get(name)
+    if not value:
+        print(f"ERROR: {name} is missing from .env", file=sys.stderr)
+        return 1
+    sys.stdout.write(value)
     return 0
 
 
@@ -182,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         if name == "verify":
             p.add_argument("--live-test", action="store_true", help="send a signed fake /help update")
     sub.add_parser("delete", help="deleteWebhook (rollback)")
+    pe = sub.add_parser("print-env", help="write one .env value to stdout (for piping into secret stores ONLY)")
+    pe.add_argument("name", choices=sorted(PRINTABLE))
     args = parser.parse_args(argv)
 
     if args.cmd == "gen-secret":
@@ -190,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_register(args.env_file, args.url)
     if args.cmd == "verify":
         return cmd_verify(args.env_file, args.url, args.live_test)
+    if args.cmd == "print-env":
+        return cmd_print_env(args.env_file, args.name)
     return cmd_delete(args.env_file)
 
 

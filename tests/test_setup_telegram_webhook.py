@@ -135,3 +135,34 @@ def test_verify_live_test_fails_without_reply(env_file, requests_mock):
         {"status_code": 200, "json": {"ok": True, "replied": False}},
     ])
     assert stw.main(["--env-file", str(env_file), "verify", "--url", WORKER, "--live-test"]) == 1
+
+
+@pytest.mark.parametrize("initial", ["TELEGRAM_WEBHOOK_SECRET=\n", "TELEGRAM_WEBHOOK_SECRET=''\n", "export TELEGRAM_WEBHOOK_SECRET=\n"])
+def test_gen_secret_replaces_empty_key_in_place(tmp_path, initial):
+    p = tmp_path / ".env"
+    p.write_text("A=1\n" + initial + "B=2\n")
+    assert stw.main(["--env-file", str(p), "gen-secret"]) == 0
+    text = p.read_text()
+    assert text.count("TELEGRAM_WEBHOOK_SECRET") == 1
+    assert stw._load(p)["TELEGRAM_WEBHOOK_SECRET"] and stw._load(p)["A"] == "1" and stw._load(p)["B"] == "2"
+
+
+def test_gen_secret_new_file_is_0600(tmp_path):
+    p = tmp_path / ".env"
+    assert stw.main(["--env-file", str(p), "gen-secret"]) == 0
+    assert (p.stat().st_mode & 0o777) == 0o600
+
+
+def test_print_env_raw_value_handles_quotes_and_export(tmp_path, capsys):
+    p = tmp_path / ".env"
+    p.write_text("export TELEGRAM_BOT_TOKEN='1:abc'\n")
+    assert stw.main(["--env-file", str(p), "print-env", "TELEGRAM_BOT_TOKEN"]) == 0
+    assert capsys.readouterr().out == "1:abc"
+
+
+def test_print_env_missing_and_disallowed(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text("X=1\n")
+    assert stw.main(["--env-file", str(p), "print-env", "TELEGRAM_CHAT_ID"]) == 1
+    with pytest.raises(SystemExit):
+        stw.main(["--env-file", str(p), "print-env", "SUPABASE_DB_URL"])

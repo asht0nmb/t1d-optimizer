@@ -130,15 +130,17 @@ the *web* project (`t1d-optimizer`), so link a throwaway directory to the
 worker project (`t1d-optimizer-meal-bot`) instead:
 
 ```bash
-ENV_FILE="$PWD/.env"
+REPO="$PWD"
 WORKDIR="$(mktemp -d)" && cd "$WORKDIR"
 vercel link --project t1d-optimizer-meal-bot --yes
-grep '^TELEGRAM_WEBHOOK_SECRET=' "$ENV_FILE" | cut -d= -f2- | tr -d '\r\n' \
-  | vercel env add TELEGRAM_WEBHOOK_SECRET production --sensitive
+(cd "$REPO" && uv run python scripts/setup_telegram_webhook.py print-env TELEGRAM_WEBHOOK_SECRET) \
+  | vercel env add TELEGRAM_WEBHOOK_SECRET production --sensitive --force
 ```
 
-If the variable already exists, `vercel env rm TELEGRAM_WEBHOOK_SECRET production`
-first. Check the worker also has `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+`print-env` uses python-dotenv to emit the raw parsed value (quotes and
+`export` handled) with no trailing newline; it exists only to be piped and must
+never be run without a pipe to a secret store. `--force` overwrites an existing
+value. Check the worker also has `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 (`vercel env ls production`).
 
 **(c) Redeploy worker production** so the new env var takes effect (still in
@@ -152,7 +154,7 @@ vercel redeploy <that-deployment-url>
 **(d) Register the webhook, then verify** (back in the repo root):
 
 ```bash
-cd - >/dev/null; rm -rf "$WORKDIR"
+cd "$REPO"; rm -rf "$WORKDIR"
 uv run python scripts/setup_telegram_webhook.py register
 uv run python scripts/setup_telegram_webhook.py verify
 uv run python scripts/setup_telegram_webhook.py verify --live-test   # optional
@@ -174,9 +176,9 @@ Rollback: `uv run python scripts/setup_telegram_webhook.py delete`.
 `TELEGRAM_CHAT_ID` from repo secrets:
 
 ```bash
-grep '^TELEGRAM_BOT_TOKEN=' .env | cut -d= -f2- | tr -d '\r\n' \
+uv run python scripts/setup_telegram_webhook.py print-env TELEGRAM_BOT_TOKEN \\
   | gh secret set TELEGRAM_BOT_TOKEN --repo asht0nmb/t1d-optimizer
-grep '^TELEGRAM_CHAT_ID=' .env | cut -d= -f2- | tr -d '\r\n' \
+uv run python scripts/setup_telegram_webhook.py print-env TELEGRAM_CHAT_ID \\
   | gh secret set TELEGRAM_CHAT_ID --repo asht0nmb/t1d-optimizer
 gh secret list --repo asht0nmb/t1d-optimizer
 ```
