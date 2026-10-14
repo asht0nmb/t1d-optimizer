@@ -49,7 +49,9 @@ jobs:
           PYTHONUNBUFFERED: "1"
         # No -v / DEBUG: Actions logs are public and tconnectsync logs device
         # ids at DEBUG. Logging is also redacted in-process (ingestion.redaction).
-        run: uv run python scripts/sync_tandem_to_supabase.py
+        # Default-deny output gate (scripts/ci_log_gate.py): only our own
+        # logger lines + ::add-mask:: reach this public log. Exit code preserved.
+        run: uv run python scripts/ci_log_gate.py -- python scripts/sync_tandem_to_supabase.py
 
       # The dashboards silently go stale when this job fails — page the
       # owner on the same channel the live alerts use.

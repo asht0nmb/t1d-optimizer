@@ -41,4 +41,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           USER_CONFIG_PATH: ${{ secrets.USER_CONFIG_PATH }}
           PYTHONUNBUFFERED: "1"
-        run: uv run python -m apps.personal.cron.detect_meal_rise
+        # Default-deny output gate (scripts/ci_log_gate.py): only our own
+        # logger lines + ::add-mask:: reach this public log. Exit code preserved.
+        run: uv run python scripts/ci_log_gate.py -- python -m apps.personal.cron.detect_meal_rise
