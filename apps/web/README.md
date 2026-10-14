@@ -1,10 +1,10 @@
 # T1D Engine — Personal dashboard (Phase A)
 
-Next.js 14 App Router dashboard reading from Supabase Postgres. Auth via Supabase (email magic link). Server API routes use the **service role** for reads; the browser only sees the anon key + user session.
+Next.js 16 App Router dashboard reading from Supabase Postgres. Auth via Supabase (email magic link). Server API routes use the **service role** for reads; the browser only sees the anon key + user session.
 
 ## Prerequisites
 
-- Node 20+
+- Node 20.9+ (CI runs Node 22)
 - Supabase project with `db/migrations/0001_init.sql` applied and data bootstrapped
 - RLS enabled (`0003_enable_rls.sql`) — signed-in `authenticated` users can read all rows; anon sees nothing
 

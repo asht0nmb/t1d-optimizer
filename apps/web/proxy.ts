@@ -1,12 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 
-export function shouldBypassMiddleware(pathname: string): boolean {
+export function shouldBypassProxy(pathname: string): boolean {
   return pathname.startsWith("/api/");
 }
 
-export async function middleware(request: NextRequest) {
-  if (shouldBypassMiddleware(request.nextUrl.pathname)) {
+export async function proxy(request: NextRequest) {
+  if (shouldBypassProxy(request.nextUrl.pathname)) {
     return NextResponse.next();
   }
   return updateSession(request);

@@ -44,4 +44,10 @@ describe("classifyFreshness", () => {
     const ts2 = "2026-06-10T11:00:00.000Z";
     expect(classifyFreshness(ts2, 24, now)).toBe("stale");
   });
+
+  it("flags timestamps >5 min in the future as not ok (clock skew)", () => {
+    expect(classifyFreshness("2026-06-11T12:04:00.000Z", 26, now)).toBe("ok");
+    expect(classifyFreshness("2026-06-11T12:06:00.000Z", 26, now)).toBe("stale");
+    expect(classifyFreshness("2026-06-12T12:00:00.000Z", 26, now)).toBe("stale");
+  });
 });
