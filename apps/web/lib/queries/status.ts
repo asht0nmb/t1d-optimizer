@@ -1,17 +1,17 @@
 import { queryRows } from "@/lib/queries/db";
 import { classifyFreshness } from "@/lib/status";
+import { buildLiveSignals } from "@/lib/live-loop";
 import type { StatusResponse, StatusSignal } from "@/lib/types/api";
 
 // CGM/data freshness — nightly sync cadence + slack
 const CGM_THRESHOLD_HOURS = 26;
 // Detection recency — only fires on rises; absence isn't failure
 const DETECTION_THRESHOLD_HOURS = 24;
-// Live meal-rise loop heartbeat — the worker polls every 5 min and rewrites
-// the `live_cron` fetch_state row each completed cycle. 15 min ≈ 3 missed
-// cycles → stale. This is the only signal that distinguishes "loop healthy but
-// idle" from "loop dead" (the detection signal cannot).
+// Live meal-rise loop: the worker polls every 5 min and rewrites the
+// `live_cron` fetch_state row each completed cycle. `last_synced_at` advances
+// only on cycles that evaluated fresh CGM; `meta.last_cycle_at` advances every
+// cycle. See lib/live-loop.ts for the signal mapping.
 const LIVE_CRON_SOURCE = "live_cron";
-const LIVE_CRON_THRESHOLD_HOURS = 0.25;
 
 interface RawCgmLatest {
   latest_ts: string | null;
@@ -21,6 +21,8 @@ interface RawFetchState {
   source_id: string;
   source_kind: string;
   last_synced_at: string | null;
+  last_synced_at_utc: string | null;
+  meta: unknown;
   updated_at: string;
 }
 
@@ -46,6 +48,8 @@ export async function fetchStatus(
         source_id,
         source_kind,
         (last_synced_at AT TIME ZONE $1)::text AS last_synced_at,
+        to_char(last_synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_synced_at_utc,
+        meta,
         (updated_at AT TIME ZONE $1)::text AS updated_at
       FROM fetch_state
       ORDER BY source_id`,
@@ -78,21 +82,10 @@ export async function fetchStatus(
     detail: null,
   });
 
-  // 2. Live meal-rise loop heartbeat (pulled out of the generic sync rows so
-  // it gets the tight 15-min threshold rather than the 26h sync threshold).
+  // 2. Live loop: worker liveness and CGM flow are separate signals.
   const liveCronRow =
     fetchStateRows.find((r) => r.source_id === LIVE_CRON_SOURCE) ?? null;
-  signals.push({
-    label: "Live loop",
-    timestamp: liveCronRow?.last_synced_at
-      ? liveCronRow.last_synced_at.slice(0, 16)
-      : null,
-    freshness: classifyFreshness(
-      liveCronRow?.last_synced_at ?? null,
-      LIVE_CRON_THRESHOLD_HOURS,
-    ),
-    detail: "5-min poll",
-  });
+  signals.push(...buildLiveSignals(liveCronRow, timezone));
 
   // 3. Nightly Tandem sync freshness — one row per (non-live-cron) source.
   const syncRows = fetchStateRows.filter(
