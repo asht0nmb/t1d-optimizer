@@ -1,0 +1,150 @@
+# 2026-10-14 — Live loop observability (production change)
+
+**This changes the live health-data worker.** It edits the Vercel cron worker
+(`apps/personal/cron/`) and the Telegram `/status` command
+(`apps/personal/telegram/`). Detection logic, thresholds and existing
+`meal_rise` config values are untouched.
+
+## Why
+
+The August audit (`2026-08-16-live-system-health-audit.md`) found that
+`detection_results` and `alerts_sent` had zero rows since the loop started
+and that a healthy-looking heartbeat said nothing about whether the loop
+could see glucose data. On 2026-10-13/14 Dexcom Share returned no readings
+for ~24 h (G7 phone app disconnected) while the `live_cron` heartbeat stayed
+fresh the whole time, so both the web `/status` page and Telegram `/status`
+reported "Live loop: ok". Nothing told the owner the loop was blind.
+
+Root cause in code: `run_cron()` returned 0 on empty Dexcom data and on a
+stale newest reading, and the `finally` block wrote the heartbeat on every
+non-raising cycle.
+
+## What changed
+
+### 1. Truthful heartbeat (no DB migration)
+
+The `fetch_state` row `source_id = 'live_cron'` is now read-modify-written
+every cycle (`apps/personal/cron/live_health.py`):
+
+- `last_synced_at` (`FetchState.last_fetched_at`) advances **only on a cycle
+  that evaluated fresh CGM** (newest reading within
+  `meal_rise.max_reading_age_minutes`). On `no_data`, `stale` and `error`
+  cycles the previous value is carried forward. If the prior state cannot be
+  read, nothing is written (a blind write would wipe counters).
+- `meta` (jsonb, plain JSON only):
+
+| key | meaning |
+|---|---|
+| `last_cycle_at` | ISO time of the latest completed cycle (worker liveness) |
+| `last_outcome` | `no_data`, `stale`, `insufficient_window`, `no_candidate`, `suppressed_refractory`, `suppressed_duplicate`, `suppressed_claim_lost`, `detected`, `alert_sent`, `error` |
+| `last_reading_at` / `last_reading_age_min` | newest Dexcom reading ever seen (carried forward when a cycle sees none) and its age at `last_cycle_at` |
+| `outcome_counts` | `{"YYYY-MM-DD": {outcome: n}}` local-day counters, newest 14 days kept |
+| `stale_since`, `stale_alert_sent_at` | blind-episode state for the alert below |
+
+Outcome notes: `detected` = rise found and claimed but Telegram delivery
+failed; `alert_sent` = rise found and delivered; a missing Telegram config on
+a detection is recorded as `error` (the cycle still returns 1 as before).
+`insufficient_window` is derived from the same guards `detect_meal_rise`
+applies (`min_samples`, `min_coverage`, `has_gap`) without modifying it.
+Per-cycle outcomes are deliberately NOT written to `detection_results`: the
+web "Last detection" signal and Telegram `/status` use `MAX(created_at)` over
+that table, and cycle logs there would make both look healthy.
+
+Consequence for existing readers: the web `/status` "Live loop" row reads
+`last_synced_at` with a 15-min threshold, so it now goes stale whenever fresh
+CGM stops arriving (Dexcom blind, sensor warmup/swap, phone disconnected).
+That is the truthful signal for "the loop can detect meals", but it can no
+longer distinguish "worker dead" from "Dexcom blind". See the web follow-up
+below. The Postgres `updated_at` column still bumps on every write.
+
+### 2. Stale-CGM Telegram alert
+
+When the newest Dexcom reading is more than `cgm_stale_alert_minutes` old (or
+none has been seen) the worker sends one Telegram message
+("No Dexcom readings for ~Xmin - is the G7 app connected and Share turned
+on? ..."). De-duplication lives in `meta`: the first stale cycle records
+`stale_since`; the alert records `stale_alert_sent_at` only when Telegram
+confirms delivery (a failed send retries next cycle); re-alerts need
+`cgm_stale_realert_hours` to elapse. When fresh data returns after an alerted
+episode a one-line recovery note is sent and the episode fields are cleared;
+short gaps that never alerted clear silently. Messages contain only a minute
+count - no glucose values, no usernames.
+
+Limit: this runs inside the worker, so it cannot fire if the worker itself is
+dead. That case is still covered by the cron-job.org failure notifications
+(DEPLOY.md section 5) and by `/status`.
+
+### 3. Telegram `/status`
+
+Adds a "Live loop" section: last cycle age (with a "worker may be down" flag
+past `worker_cycle_stale_minutes`), last Dexcom reading age (flagged stale past
+`max_reading_age_minutes`), last outcome, and today's (local-day) outcome
+counts. Missing row / malformed meta degrade to a plain message.
+
+### 4. Config (new block at the end of `config/user_config.yaml`)
+
+```yaml
+live_health:
+  cgm_stale_alert_minutes: 60     # alert if no fresh reading for MORE than this
+  cgm_stale_realert_hours: 12     # min gap between repeat alerts in one episode
+  worker_cycle_stale_minutes: 15  # /status "worker may be down" threshold
+  outcome_counter_days: 14        # days of per-day counters kept in meta
+```
+
+All keys are optional with the defaults shown (the block may be absent, e.g.
+when `USER_CONFIG_PATH` points elsewhere); invalid values fall back to the
+defaults with a logged warning. Parsed from `AppConfig.raw` by
+`LiveHealthConfig`, deliberately not added to `AppConfig` (keeps
+`detection/config.py` free of merge conflicts with concurrent work).
+
+### 5. Testability
+
+`run_cron()` gained optional injection kwargs (`storage`, `config`,
+`fetch_cgm`, `send`); `api/index.py`'s bare `run_cron()` is unchanged. New
+tests use `InMemoryStorage`, a fake fetcher and a fake sender and scrub
+credentials / patch real I/O to raise. Note: `load_dotenv()` at import walks
+parent directories, so inside a git worktree under the main checkout the real
+`.env` is loaded into `os.environ` for the whole pytest session; new tests
+defend against this explicitly.
+
+One existing test changed on purpose:
+`test_cron_failure_skips_heartbeat_and_alerts` previously asserted no
+heartbeat row after a failing cycle; it now asserts `last_synced_at` was NOT
+advanced and `last_outcome == "error"`.
+
+## Deploy (production)
+
+- Target: the **cron-worker Vercel project** (`t1d-optimizer-meal-bot`, Root
+  Directory `.`), not the dashboard project. No new dependencies, no
+  migration, `requirements.txt` / `uv.lock` untouched.
+- Redeploy: `DEPLOY.md` and `apps/cron_worker/README.md` do not state a deploy
+  trigger. The project was created by importing the GitHub repo, so Vercel's
+  Git integration should auto-deploy the production branch on merge to `main`;
+  confirm in the Vercel dashboard, otherwise deploy manually
+  (`vercel deploy --prod` from the repo root). This PR is not merged by the
+  author.
+- First cycle after deploy overwrites the legacy heartbeat (no meta) with the
+  new shape; counters start from zero.
+
+## Watch after deploy
+
+1. Telegram `/status` within ~10 min: "Live loop" shows a recent last cycle
+   and an outcome other than `error`.
+2. `SELECT last_synced_at, meta FROM fetch_state WHERE source_id='live_cron'`
+   - `meta.last_outcome` should be `no_candidate` / `insufficient_window`
+   while the G7 is connected; `last_synced_at` within ~15 min.
+3. The web "Live loop" badge tracks fresh CGM (see caveat above). Expect it
+   to go stale during a sensor warmup/swap; that is by design until the web
+   follow-up lands.
+4. If the G7 is still disconnected you should receive exactly one "No Dexcom
+   readings" alert, then at most one every 12 h, then one recovery note.
+5. Worker-error Telegram messages still fire every failing cycle (pre-existing
+   behaviour, not changed here).
+
+## Web follow-up (not done here; `apps/web` is owned by another change)
+
+To show worker liveness and CGM freshness as separate signals in
+`apps/web/lib/queries/status.ts`: add `meta` to the `fetch_state` SELECT and to
+`RawFetchState`; emit "Live loop" from `meta.last_cycle_at` (15-min
+threshold) and a new "Live CGM" signal from `last_synced_at`, with
+`detail = meta.last_outcome`.

@@ -12,6 +12,7 @@ from datetime import date, datetime
 
 import pandas as pd
 
+from apps.personal.cron.live_health import LiveSummary
 from core.bolus_categories import FOOD_CARRYING as _FOOD_CARRYING
 from core.metrics.cgm_metrics import time_in_range
 
@@ -111,6 +112,33 @@ def _age_label(ts: datetime | None, now: datetime) -> str:
     return f"{hours / 24:.0f} d ago"
 
 
+def _live_lines(live: LiveSummary, now: datetime) -> list[str]:
+    """Live-loop section: what the 5-min worker is actually seeing."""
+    if live.last_cycle_at is None:
+        return ["", "<b>Live loop</b>", "No heartbeat recorded yet."]
+    lines = ["", "<b>Live loop</b>"]
+    lines.append(f"Last cycle: {_age_label(live.last_cycle_at, now)}")
+    if live.cycle_stale:
+        lines.append("Worker may be down: no recent cycle recorded.")
+    if live.last_reading_at is None:
+        lines.append("Last Dexcom reading: none seen")
+    else:
+        flag = " (stale: no fresh CGM)" if live.reading_stale else ""
+        lines.append(
+            f"Last Dexcom reading: {_age_label(live.last_reading_at, now)}{flag}"
+        )
+    lines.append(f"Last outcome: {live.last_outcome or 'unknown'}")
+    if live.today_counts:
+        counts = ", ".join(
+            f"{k} {v}"
+            for k, v in sorted(live.today_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        lines.append(f"Today: {counts}")
+    else:
+        lines.append("Today: no cycles recorded")
+    return lines
+
+
 def build_status_digest(
     *,
     latest_cgm_ts: datetime | None,
@@ -118,8 +146,13 @@ def build_status_digest(
     latest_alert_ts: datetime | None,
     latest_alert_delivery: str | None,
     now: datetime,
+    live: LiveSummary | None = None,
 ) -> str:
-    """Automation-health digest mirroring the web /status semantics."""
+    """Automation-health digest mirroring the web /status semantics.
+
+    ``live`` (when given) appends the live-loop section: last cycle, last
+    Dexcom reading age, last outcome, and today's outcome counts.
+    """
     alert_line = (
         f"Last alert: {_fmt_ts(latest_alert_ts)} ({latest_alert_delivery})"
         if latest_alert_ts is not None
@@ -132,6 +165,8 @@ def build_status_digest(
         f"({_age_label(latest_detection_ts, now)})",
         alert_line,
     ]
+    if live is not None:
+        lines += _live_lines(live, now)
     return "\n".join(lines)
 
 

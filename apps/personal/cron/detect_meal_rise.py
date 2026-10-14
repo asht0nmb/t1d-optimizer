@@ -29,26 +29,15 @@ from core.detection.meal_rise import MealRiseConfig, MealRiseDetection
 from core.storage.protocol import Storage
 from core.storage.records import AlertRecord, DetectionResult, FetchState
 
-# Heartbeat source id for the live meal-rise worker. A fetch_state row under
-# this id is rewritten on every completed cycle so the worker's liveness is
-# observable (the /status page reads it); its absence/staleness signals the
-# loop has stopped, which the "last detection" signal cannot (detections only
-# fire on rises).
-_LIVE_CRON_SOURCE = "live_cron"
-
-
-def _write_live_heartbeat(storage: Any, when: datetime) -> None:
-    """Record a liveness heartbeat for the live meal-rise worker."""
-    storage.set_fetch_state(
-        _LIVE_CRON_SOURCE,
-        FetchState(
-            source_id=_LIVE_CRON_SOURCE,
-            last_cursor=None,
-            last_fetched_at=when,
-            source_kind="pydexcom",
-        ),
-    )
 from detection.config import AppConfig, get_config
+
+from apps.personal.cron.live_health import (
+    LIVE_CRON_SOURCE as _LIVE_CRON_SOURCE,  # noqa: F401  (re-exported name)
+    CycleReport,
+    LiveHealthConfig,
+    classify_no_detection,
+    record_cycle,
+)
 
 MealRiseAlertOutcome = Literal["sent", "suppressed", "failed_config", "partial_success"]
 
@@ -318,18 +307,46 @@ def handle_detection_alert(
     *,
     latest_ts: datetime,
     send_telegram: Callable[[str], bool],
+    telegram_configured: bool | None = None,
 ) -> MealRiseAlertOutcome:
     """Dedup, claim, persist detection, and send Telegram for one firing."""
+    return _handle_detection_alert(
+        storage,
+        config,
+        detection,
+        latest_ts=latest_ts,
+        send_telegram=send_telegram,
+        telegram_configured=telegram_configured,
+    )[0]
+
+
+def _handle_detection_alert(
+    storage: Storage,
+    config: AppConfig,
+    detection: MealRiseDetection,
+    *,
+    latest_ts: datetime,
+    send_telegram: Callable[[str], bool],
+    telegram_configured: bool | None = None,
+) -> tuple[MealRiseAlertOutcome, str | None]:
+    """Implementation of :func:`handle_detection_alert`.
+
+    Returns ``(outcome, suppression_gate)``; the gate is one of
+    ``refractory`` / ``duplicate`` / ``claim_lost`` when outcome is
+    ``suppressed`` (used for the per-cycle outcome log), else ``None``.
+    ``telegram_configured`` overrides the env/config credential check when the
+    caller injected its own sender.
+    """
     event_ref = f"meal_rise:{latest_ts.isoformat(timespec='minutes')}"
     refractory_window = timedelta(minutes=config.meal_rise.refractory_minutes)
 
     if storage.recent_alerts("meal_rise", refractory_window):
         logger.info("Suppressed: within refractory window")
-        return "suppressed"
+        return "suppressed", "refractory"
 
     if storage.find_alert("meal_rise", event_ref):
         logger.info("Suppressed: event_ref already exists: %s", event_ref)
-        return "suppressed"
+        return "suppressed", "duplicate"
 
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or config.raw.get(
         "notifications", {}
@@ -338,9 +355,11 @@ def handle_detection_alert(
         "notifications", {}
     ).get("telegram_chat_id")
 
-    if not bot_token or not chat_id:
+    if telegram_configured is None:
+        telegram_configured = bool(bot_token and chat_id)
+    if not telegram_configured:
         logger.error("Missing Telegram configuration; cannot send alert.")
-        return "failed_config"
+        return "failed_config", None
 
     msg = config.meal_rise.alert_template.format(
         start=detection.start_level,
@@ -365,7 +384,7 @@ def handle_detection_alert(
     )
     if not claim_result.inserted:
         logger.info("Suppressed: lost claim race for %s", event_ref)
-        return "suppressed"
+        return "suppressed", "claim_lost"
 
     telegram_sent = send_telegram(msg)
     result_payload = dict(detection.to_payload())
@@ -388,42 +407,68 @@ def handle_detection_alert(
 
     logger.info("Alert handled for %s (telegram_sent=%s)", event_ref, telegram_sent)
     if telegram_sent:
-        return "sent"
-    return "partial_success"
+        return "sent", None
+    return "partial_success", None
 
 
-def run_cron(*, now: datetime | None = None) -> int:
+def run_cron(
+    *,
+    now: datetime | None = None,
+    storage: Storage | None = None,
+    config: AppConfig | None = None,
+    fetch_cgm: Callable[[], pd.DataFrame] | None = None,
+    send: Callable[[str], bool] | None = None,
+) -> int:
     """Run the live missed-meal alerting cron pipeline.
 
     Args:
         now: Reference "now" for the freshness guard and retry pass. Defaults
             to ``datetime.now(timezone.utc)``; injectable for tests.
+        storage: Storage to use. Defaults to the env-selected backend
+            (``get_storage_connection``); injectable for tests.
+        config: Typed config. Defaults to :func:`get_config`.
+        fetch_cgm: Zero-arg CGM fetcher returning a normalized frame.
+            Defaults to a live Dexcom Share poll.
+        send: Telegram sender ``(text) -> delivered``. Defaults to the Bot API
+            using ``TELEGRAM_BOT_TOKEN`` / ``TELEGRAM_CHAT_ID``.
+
+    Every cycle (including blind ones) ends by recording its outcome on the
+    ``live_cron`` heartbeat row; see :mod:`apps.personal.cron.live_health`.
     """
     # 1. Load config
-    config = get_config()
+    config = config or get_config()
     tz_name = config.timezone
     now = now or datetime.now(timezone.utc)
+    health_cfg = LiveHealthConfig.from_app_config(config)
 
     # 2. Connect to storage
-    try:
-        storage, conn = get_storage_connection()
-    except Exception as e:
-        logger.exception("Failed to connect to storage: %s", e)
-        return 1
+    conn = None
+    if storage is None:
+        try:
+            storage, conn = get_storage_connection()
+        except Exception as e:
+            logger.exception("Failed to connect to storage: %s", e)
+            return 1
 
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or config.raw.get(
-        "notifications", {}
-    ).get("telegram_bot_token")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or config.raw.get(
-        "notifications", {}
-    ).get("telegram_chat_id")
+    telegram_configured: bool | None
+    if send is not None:
+        _send = send
+        telegram_configured = True
+    else:
+        telegram_configured = None
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or config.raw.get(
+            "notifications", {}
+        ).get("telegram_bot_token")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID") or config.raw.get(
+            "notifications", {}
+        ).get("telegram_chat_id")
 
-    def _send(msg: str) -> bool:
-        if not bot_token or not chat_id:
-            return False
-        return send_telegram_message(bot_token, chat_id, msg)
+        def _send(msg: str) -> bool:
+            if not bot_token or not chat_id:
+                return False
+            return send_telegram_message(bot_token, chat_id, msg)
 
-    failed = False
+    report = CycleReport()  # outcome defaults to "error" until proven otherwise
     try:
         retry_summary = retry_failed_alert_deliveries(
             storage,
@@ -438,16 +483,24 @@ def run_cron(*, now: datetime | None = None) -> int:
                 retry_summary["succeeded"],
             )
 
-        # 3. Fetch recent CGM
-        cgm_df = fetch_dexcom_cgm(config.meal_rise, tz_name)
+        # 3. Fetch recent CGM (a raise here counts as "no CGM feed")
+        report.cgm_state = "none"
+        if fetch_cgm is not None:
+            cgm_df = fetch_cgm()
+        else:
+            cgm_df = fetch_dexcom_cgm(config.meal_rise, tz_name)
         if cgm_df.empty:
             logger.warning("CGM data is empty; exiting.")
+            report.outcome = "no_data"
             return 0
 
         # Latest reading
         latest_reading = cgm_df.iloc[-1]
         latest_ts = latest_reading["timestamp"]
         latest_bg = latest_reading["bg_mgdl"]
+        report.last_reading_at = (
+            latest_ts.to_pydatetime() if hasattr(latest_ts, "to_pydatetime") else latest_ts
+        )
         logger.info("Latest CGM Reading: %s @ %d mg/dL", latest_ts.isoformat(), latest_bg)
 
         # 3b. Freshness guard — refuse to act on stale CGM. Dexcom Share can
@@ -461,7 +514,10 @@ def run_cron(*, now: datetime | None = None) -> int:
                 age_minutes,
                 config.meal_rise.max_reading_age_minutes,
             )
+            report.cgm_state = "stale"
+            report.outcome = "stale"
             return 0
+        report.cgm_state = "fresh"
 
         # 4. Construct Anchor and Window
         anchor = Anchor(timestamp=latest_ts, kind="live")
@@ -483,6 +539,7 @@ def run_cron(*, now: datetime | None = None) -> int:
         detection = detect_meal_rise(window, config.meal_rise)
         if detection is None:
             logger.info("No fast rise detected; exiting cleanly.")
+            report.outcome = classify_no_detection(window, config.meal_rise)
             return 0
 
         logger.info(
@@ -492,21 +549,29 @@ def run_cron(*, now: datetime | None = None) -> int:
             detection.threshold_used
         )
 
-        outcome = handle_detection_alert(
+        outcome, gate = _handle_detection_alert(
             storage,
             config,
             detection,
             latest_ts=latest_ts,
             send_telegram=_send,
+            telegram_configured=telegram_configured,
         )
         if outcome == "failed_config":
+            report.outcome = "error"
             return 1
+        if outcome == "suppressed":
+            report.outcome = f"suppressed_{gate}"
+        elif outcome == "sent":
+            report.outcome = "alert_sent"
+        else:  # partial_success: detected + claimed, Telegram delivery failed
+            report.outcome = "detected"
 
         logger.info("Cron loop completed (outcome=%s).", outcome)
         return 0
 
     except Exception as e:
-        failed = True
+        report.outcome = "error"
         logger.exception("Meal-rise cron cycle failed: %s", e)
         try:
             _send(
@@ -518,14 +583,20 @@ def run_cron(*, now: datetime | None = None) -> int:
         return 1
 
     finally:
-        # Heartbeat on any completed cycle (success or clean no-op exit), but
-        # NOT when the cycle raised — the absence of a fresh heartbeat is the
-        # liveness signal the /status page watches for.
-        if not failed:
-            try:
-                _write_live_heartbeat(storage, now)
-            except Exception:
-                logger.warning("live_cron heartbeat write failed", exc_info=True)
+        # Record this cycle's outcome on the live_cron heartbeat. The row's
+        # last_synced_at only advances on a cycle that evaluated FRESH CGM, so
+        # a loop that is running but blind reads as stale on /status.
+        try:
+            record_cycle(
+                storage,
+                report,
+                now=now,
+                tz_name=tz_name,
+                cfg=health_cfg,
+                send=_send,
+            )
+        except Exception:
+            logger.warning("live_cron heartbeat write failed", exc_info=True)
         if conn is not None:
             conn.close()
 

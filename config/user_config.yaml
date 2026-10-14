@@ -83,3 +83,11 @@ meal_rise_calibration:
   late_bolus_lookahead_minutes: 45    # food bolus up to this far after the rise start → late_bolused
   correction_lookahead_minutes: 180   # window to attribute an uncovered miss to a user/auto correction
 
+
+# Live loop observability (apps/personal/cron/live_health.py). All keys optional;
+# the code defaults below apply when the block is absent.
+live_health:
+  cgm_stale_alert_minutes: 60     # alert when no fresh Dexcom reading for MORE than this long
+  cgm_stale_realert_hours: 12     # re-alert at most this often while the same blind episode continues
+  worker_cycle_stale_minutes: 15  # /status flags the worker itself as possibly down past this age (~3 missed 5-min cycles)
+  outcome_counter_days: 14        # per-day cycle-outcome counters kept in the live_cron heartbeat meta
