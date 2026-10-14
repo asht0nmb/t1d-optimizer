@@ -107,15 +107,80 @@ curl -i -H "Authorization: Bearer $CRON_SECRET" \
 # 401 without auth; 200 {"ok":true,"exit_code":0} on success
 ```
 
-## 6. Telegram setWebhook
+## 6. Telegram webhook (command bot) + GitHub alert secrets
 
-Point the bot at the worker's `/api/telegram` endpoint with a `secret_token`
-matching `TELEGRAM_WEBHOOK_SECRET` (the handler rejects requests without it):
+The command bot (`/today`, `/status`, ...) needs **both** a registered Telegram
+webhook and `TELEGRAM_WEBHOOK_SECRET` in the worker's Vercel env. Without the
+secret the handler fails closed (every request returns 401); without the
+webhook Telegram never calls it. `scripts/setup_telegram_webhook.py` handles
+the Telegram side. Secret-store writes (Vercel env, GitHub secrets) are done by
+the owner, by hand, in the order below. Run everything from the repo root, with
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` already in `.env`. Secrets are
+piped from `.env`, never typed or echoed.
+
+**(a) Generate the webhook secret** (appended to `.env` only if missing; the
+value is never printed):
 
 ```bash
-curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-  --data-urlencode "url=https://<worker-project>.vercel.app/api/telegram" \
-  --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}"
+uv run python scripts/setup_telegram_webhook.py gen-secret
+```
+
+**(b) Add it to the worker's Vercel Production env.** The repo root is linked to
+the *web* project (`t1d-optimizer`), so link a throwaway directory to the
+worker project (`t1d-optimizer-meal-bot`) instead:
+
+```bash
+REPO="$PWD"
+WORKDIR="$(mktemp -d)" && cd "$WORKDIR"
+vercel link --project t1d-optimizer-meal-bot --yes
+(cd "$REPO" && uv run python scripts/setup_telegram_webhook.py print-env TELEGRAM_WEBHOOK_SECRET) \
+  | vercel env add TELEGRAM_WEBHOOK_SECRET production --sensitive --force
+```
+
+`print-env` uses python-dotenv to emit the raw parsed value (quotes and
+`export` handled) with no trailing newline; it exists only to be piped and must
+never be run without a pipe to a secret store. `--force` overwrites an existing
+value. Check the worker also has `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+(`vercel env ls production`).
+
+**(c) Redeploy worker production** so the new env var takes effect (still in
+`$WORKDIR`):
+
+```bash
+vercel ls --prod            # pick the latest Ready production deployment URL
+vercel redeploy <that-deployment-url>
+```
+
+**(d) Register the webhook, then verify** (back in the repo root):
+
+```bash
+cd "$REPO"; rm -rf "$WORKDIR"
+uv run python scripts/setup_telegram_webhook.py register
+uv run python scripts/setup_telegram_webhook.py verify
+uv run python scripts/setup_telegram_webhook.py verify --live-test   # optional
+```
+
+`register` calls `setWebhook` with the worker URL (default
+`https://t1d-optimizer-meal-bot.vercel.app/api/telegram`; override with
+`--url`), the secret, `allowed_updates=["message"]` and
+`drop_pending_updates=true`. `verify` prints the webhook host, pending count and
+`last_error`, and expects an unauthenticated POST to the worker to return 401.
+`--live-test` sends a correctly signed fake `/help` from `TELEGRAM_CHAT_ID` and
+expects `200 {"replied": true}` (you will receive the help message in
+Telegram). Finally send `/help` or `/status` to the bot from your phone.
+
+Rollback: `uv run python scripts/setup_telegram_webhook.py delete`.
+
+**(e) GitHub repo secrets for nightly-sync failure alerts.** The nightly sync's
+"Notify Telegram on failure" step reads `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID` from repo secrets:
+
+```bash
+uv run python scripts/setup_telegram_webhook.py print-env TELEGRAM_BOT_TOKEN \\
+  | gh secret set TELEGRAM_BOT_TOKEN --repo asht0nmb/t1d-optimizer
+uv run python scripts/setup_telegram_webhook.py print-env TELEGRAM_CHAT_ID \\
+  | gh secret set TELEGRAM_CHAT_ID --repo asht0nmb/t1d-optimizer
+gh secret list --repo asht0nmb/t1d-optimizer
 ```
 
 ---
