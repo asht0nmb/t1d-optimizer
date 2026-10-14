@@ -27,8 +27,9 @@ The `fetch_state` row `source_id = 'live_cron'` is now read-modify-written
 every cycle (`apps/personal/cron/live_health.py`):
 
 - `last_synced_at` (`FetchState.last_fetched_at`) advances **only on a cycle
-  that evaluated fresh CGM** (newest reading within
-  `meal_rise.max_reading_age_minutes`). On `no_data`, `stale` and `error`
+  that evaluated fresh CGM and completed without error** (newest reading within
+  `meal_rise.max_reading_age_minutes`; if windowing/detection raises afterward
+  it is not advanced). On `no_data`, `stale` and `error`
   cycles the previous value is carried forward. If the prior state cannot be
   read, nothing is written (a blind write would wipe counters).
 - `meta` (jsonb, plain JSON only):
@@ -39,7 +40,7 @@ every cycle (`apps/personal/cron/live_health.py`):
 | `last_outcome` | `no_data`, `stale`, `insufficient_window`, `no_candidate`, `suppressed_refractory`, `suppressed_duplicate`, `suppressed_claim_lost`, `detected`, `alert_sent`, `error` |
 | `last_reading_at` / `last_reading_age_min` | newest Dexcom reading ever seen (carried forward when a cycle sees none) and its age at `last_cycle_at` |
 | `outcome_counts` | `{"YYYY-MM-DD": {outcome: n}}` local-day counters, newest 14 days kept |
-| `stale_since`, `stale_alert_sent_at` | blind-episode state for the alert below |
+| `stale_since`, `stale_alert_sent_at`, `recovery_pending`, `fresh_since` | blind-episode state for the alert below (`stale_alert_sent_at` persists across episodes) |
 
 Outcome notes: `detected` = rise found and claimed but Telegram delivery
 failed; `alert_sent` = rise found and delivered; a missing Telegram config on
@@ -62,17 +63,46 @@ below. The Postgres `updated_at` column still bumps on every write.
 When the newest Dexcom reading is more than `cgm_stale_alert_minutes` old (or
 none has been seen) the worker sends one Telegram message
 ("No Dexcom readings for ~Xmin - is the G7 app connected and Share turned
-on? ..."). De-duplication lives in `meta`: the first stale cycle records
-`stale_since`; the alert records `stale_alert_sent_at` only when Telegram
-confirms delivery (a failed send retries next cycle); re-alerts need
-`cgm_stale_realert_hours` to elapse. When fresh data returns after an alerted
-episode a one-line recovery note is sent and the episode fields are cleared;
-short gaps that never alerted clear silently. Messages contain only a minute
-count - no glucose values, no usernames.
+on? ..."). Messages contain only a minute count - no glucose values, no
+usernames. De-duplication lives in `meta`:
+
+- **Persist-then-send.** The marker (`stale_alert_sent_at`,
+  `recovery_pending`) is written to storage BEFORE the message is sent, and if
+  that write fails nothing is sent. Chosen because it fails toward fewer
+  messages: a flaky database can at worst lose an alert, never repeat one every
+  5-minute cycle (the first version sent-then-persisted; a simulated run of 29
+  failed writes produced 17 messages). If the send itself fails, the marker is
+  reverted best-effort so the next cycle retries; if that revert write also
+  fails the alert is lost, not repeated.
+- **Cross-episode hysteresis.** `stale_alert_sent_at` is kept across episodes;
+  no new alert (in this or a later episode) is sent within
+  `cgm_stale_realert_hours` (12) of the previous one.
+- **Sustained recovery.** An alerted episode is only closed, and the
+  one-line recovery note sent, after `cgm_recovery_fresh_minutes` (30) of
+  UNBROKEN fresh cycles (`fresh_since` streak, reset by any non-fresh cycle).
+  With sparse readings (e.g. one every 70-90 min, just over the 60-min
+  threshold) the episode simply stays open, so the owner gets about 2
+  messages per 24h (alert at ~1h, again at ~13h) instead of an alert plus a
+  recovery for every gap (previously ~40/24h). A real 3-day outage still
+  re-alerts every 12h (6 alerts). The recovery note is best-effort (the
+  episode is closed before it is sent; a lost note is not retried).
+- Short gaps that never alerted clear silently, and an episode suppressed by
+  the 12h guard gets no recovery note.
+- **Fetch errors are not G7 problems.** If the Dexcom fetch raises (auth,
+  network) the cycle is recorded as `error` with no stale alert and no episode
+  change, because "is the G7 connected?" would be wrong advice; the existing
+  worker-error Telegram message covers it.
 
 Limit: this runs inside the worker, so it cannot fire if the worker itself is
 dead. That case is still covered by the cron-job.org failure notifications
 (DEPLOY.md section 5) and by `/status`.
+
+Known limitation: the heartbeat is a non-atomic read-modify-write. If two
+cycles ever overlapped (cron-job.org retries, a slow cycle exceeding 5 min),
+both could read the same prior state and both send a stale alert, and one
+write would overwrite the other's counters. Acceptable for a single-user
+system on a 5-minute cadence; persist-then-send narrows the window to the
+read-to-write gap.
 
 ### 3. Telegram `/status`
 
@@ -86,9 +116,10 @@ counts. Missing row / malformed meta degrade to a plain message.
 ```yaml
 live_health:
   cgm_stale_alert_minutes: 60     # alert if no fresh reading for MORE than this
-  cgm_stale_realert_hours: 12     # min gap between repeat alerts in one episode
+  cgm_stale_realert_hours: 12     # min gap between ANY two stale alerts
   worker_cycle_stale_minutes: 15  # /status "worker may be down" threshold
   outcome_counter_days: 14        # days of per-day counters kept in meta
+  cgm_recovery_fresh_minutes: 30  # unbroken fresh CGM before recovery note
 ```
 
 All keys are optional with the defaults shown (the block may be absent, e.g.
@@ -137,7 +168,8 @@ advanced and `last_outcome == "error"`.
    to go stale during a sensor warmup/swap; that is by design until the web
    follow-up lands.
 4. If the G7 is still disconnected you should receive exactly one "No Dexcom
-   readings" alert, then at most one every 12 h, then one recovery note.
+   readings" alert, then at most one every 12 h, then one recovery note after
+   30 min of continuous fresh data.
 5. Worker-error Telegram messages still fire every failing cycle (pre-existing
    behaviour, not changed here).
 

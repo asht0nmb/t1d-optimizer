@@ -19,7 +19,16 @@ Meta layout (all optional on legacy rows)::
     last_reading_age_min  its age at ``last_cycle_at``
     outcome_counts        {"YYYY-MM-DD": {outcome: n}} local days, bounded
     stale_since           ISO ts the current blind episode started
-    stale_alert_sent_at   ISO ts of the last stale alert sent this episode
+    stale_alert_sent_at   ISO ts of the last stale alert (kept ACROSS episodes:
+                          the cross-episode re-alert guard / hysteresis)
+    recovery_pending      true while an alerted episode has not yet recovered
+    fresh_since           ISO ts the current unbroken fresh streak started
+                          (only while recovery_pending)
+
+Alert ordering is persist-then-send: the marker is written to storage BEFORE
+the Telegram message goes out, and if that write fails nothing is sent. When
+storage is flaky this fails toward fewer messages (a possibly missed alert)
+instead of repeating one every 5-minute cycle.
 """
 
 from __future__ import annotations
@@ -53,9 +62,12 @@ OUTCOMES = (
 # What the cycle learned about the CGM feed:
 #   fresh   newest reading passed the freshness guard
 #   stale   readings exist but the newest is too old
-#   none    Dexcom returned nothing / the fetch raised
+#   none    Dexcom answered but returned no readings
+#   fetch_error  the fetch itself raised (auth/network): not evidence the G7
+#           is disconnected, so no "is the G7 connected?" alert; the worker
+#           error alert already covers it
 #   unknown the cycle failed before the feed was checked (no feed verdict)
-CgmState = Literal["fresh", "stale", "none", "unknown"]
+CgmState = Literal["fresh", "stale", "none", "fetch_error", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -66,6 +78,9 @@ class LiveHealthConfig:
     cgm_stale_realert_hours: int = 12
     worker_cycle_stale_minutes: int = 15
     outcome_counter_days: int = 14
+    # Unbroken fresh CGM required before a recovery note is sent / the episode
+    # is closed. Stops sparse-reading flapping (alert+recovery every gap).
+    cgm_recovery_fresh_minutes: int = 30
 
     @classmethod
     def from_raw(cls, block: dict[str, Any] | None) -> "LiveHealthConfig":
@@ -77,6 +92,7 @@ class LiveHealthConfig:
             "cgm_stale_realert_hours",
             "worker_cycle_stale_minutes",
             "outcome_counter_days",
+            "cgm_recovery_fresh_minutes",
         ):
             val = int(block.get(f, getattr(defaults, f)))
             if val <= 0:
@@ -173,6 +189,12 @@ def _bump_counts(
     return counts
 
 
+@dataclass(frozen=True)
+class PendingMessage:
+    kind: Literal["stale_alert", "recovery"]
+    text: str
+
+
 def build_next_state(
     prev: FetchState | None,
     report: CycleReport,
@@ -180,17 +202,21 @@ def build_next_state(
     now: datetime,
     tz_name: str,
     cfg: LiveHealthConfig,
-    send: Callable[[str], bool],
-) -> FetchState:
-    """Fold one cycle into the heartbeat row (and fire stale/recovery alerts).
+) -> tuple[FetchState, list[PendingMessage]]:
+    """Fold one cycle into the heartbeat row. Pure: sends nothing.
+
+    Returns the next state (with any alert marker already set) and the
+    messages to send AFTER that state has been persisted.
 
     ``last_fetched_at`` (-> ``last_synced_at``) advances only on a cycle that
-    evaluated fresh CGM; otherwise the previous value is carried forward.
+    evaluated fresh CGM AND completed without error; otherwise the previous
+    value is carried forward.
     """
     payload: dict[str, Any] = dict(prev.payload) if prev else {}
     payload.pop("last_cursor", None)  # reserved by SupabaseStorage
+    pending: list[PendingMessage] = []
     last_fresh = prev.last_fetched_at if prev else None
-    if report.cgm_state == "fresh":
+    if report.cgm_state == "fresh" and report.outcome != "error":
         last_fresh = now
 
     # --- reading info (carried forward when this cycle saw none) -----------
@@ -215,17 +241,25 @@ def build_next_state(
     )
 
     # --- stale-CGM episode state machine -----------------------------------
+    pending_recovery = bool(payload.get("recovery_pending"))
     if report.cgm_state == "fresh":
-        if payload.get("stale_alert_sent_at"):
-            since = _parse_ts(payload.get("stale_since")) or now
-            gap = (now - since).total_seconds() / 60.0
-            if _safe_send(send, recovery_message(gap)):
-                payload.pop("stale_alert_sent_at", None)
-                payload.pop("stale_since", None)
-            # else: keep the markers so the next fresh cycle retries
+        if not pending_recovery:
+            payload.pop("stale_since", None)  # silent end of an un-alerted gap
+            payload.pop("fresh_since", None)
         else:
-            payload.pop("stale_since", None)
+            fresh_since = _parse_ts(payload.get("fresh_since")) or now
+            payload["fresh_since"] = fresh_since.isoformat()
+            streak = (now - fresh_since).total_seconds() / 60.0
+            if streak >= cfg.cgm_recovery_fresh_minutes:
+                since = _parse_ts(payload.get("stale_since")) or fresh_since
+                gap = (fresh_since - since).total_seconds() / 60.0
+                pending.append(PendingMessage("recovery", recovery_message(gap)))
+                # Persist-then-send: the episode is closed even if the note
+                # is lost. stale_alert_sent_at is deliberately KEPT.
+                for key in ("recovery_pending", "stale_since", "fresh_since"):
+                    payload.pop(key, None)
     elif report.cgm_state in ("stale", "none"):
+        payload.pop("fresh_since", None)  # freshness streak broken
         since = _parse_ts(payload.get("stale_since"))
         if since is None:
             since = last_reading or now
@@ -238,16 +272,23 @@ def build_next_state(
             (now - sent_at).total_seconds() / 3600.0 >= cfg.cgm_stale_realert_hours
         )
         if blind > cfg.cgm_stale_alert_minutes and due:
-            if _safe_send(send, stale_alert_message(blind)):
-                payload["stale_alert_sent_at"] = now.isoformat()
+            payload["stale_alert_sent_at"] = now.isoformat()
+            payload["recovery_pending"] = True
+            pending.append(PendingMessage("stale_alert", stale_alert_message(blind)))
+    elif report.cgm_state == "fetch_error":
+        payload.pop("fresh_since", None)  # not fresh, but no verdict on the G7
 
-    return FetchState(
+    state = FetchState(
         source_id=LIVE_CRON_SOURCE,
         last_cursor=None,
         last_fetched_at=last_fresh,
         payload=payload,
         source_kind="pydexcom",
     )
+    return state, pending
+
+
+_ALERT_MARKER_KEYS = ("stale_alert_sent_at", "recovery_pending")
 
 
 def record_cycle(
@@ -259,17 +300,47 @@ def record_cycle(
     cfg: LiveHealthConfig,
     send: Callable[[str], bool],
 ) -> None:
-    """Read-modify-write the heartbeat row.
+    """Read-modify-write the heartbeat row, then send any due messages.
 
-    If the prior state cannot be read, nothing is written: a blind write would
-    wipe the counters and null ``last_synced_at``. Callers wrap this in
-    try/except; it must never fail a cycle.
+    * If the prior state cannot be read, nothing is written: a blind write
+      would wipe the counters and null ``last_synced_at``.
+    * Persist-then-send: if the write fails, nothing is sent (fewer messages
+      over repeats). A stale alert whose send fails is un-marked on a
+      best-effort basis so the next cycle retries; if that revert write also
+      fails the alert is simply lost, never repeated.
+    * Not atomic across overlapping cycles (read-modify-write); acceptable
+      for a single-user system fired every 5 minutes.
+
+    Callers wrap this in try/except; it must never fail a cycle.
     """
     prev = storage.get_fetch_state(LIVE_CRON_SOURCE)
-    state = build_next_state(
-        prev, report, now=now, tz_name=tz_name, cfg=cfg, send=send
+    state, pending = build_next_state(
+        prev, report, now=now, tz_name=tz_name, cfg=cfg
     )
-    storage.set_fetch_state(LIVE_CRON_SOURCE, state)
+    storage.set_fetch_state(LIVE_CRON_SOURCE, state)  # raises -> nothing sent
+    for msg in pending:
+        delivered = _safe_send(send, msg.text)
+        if msg.kind == "stale_alert" and not delivered:
+            payload = dict(state.payload)
+            prev_payload = prev.payload if prev else {}
+            for key in _ALERT_MARKER_KEYS:
+                if key in prev_payload:
+                    payload[key] = prev_payload[key]
+                else:
+                    payload.pop(key, None)
+            try:
+                storage.set_fetch_state(
+                    LIVE_CRON_SOURCE,
+                    FetchState(
+                        source_id=state.source_id,
+                        last_cursor=None,
+                        last_fetched_at=state.last_fetched_at,
+                        payload=payload,
+                        source_kind=state.source_kind,
+                    ),
+                )
+            except Exception:
+                logger.warning("stale-alert marker revert failed", exc_info=True)
 
 
 # ── read side (Telegram /status) ─────────────────────────────────────────

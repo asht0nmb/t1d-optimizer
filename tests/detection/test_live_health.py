@@ -285,17 +285,24 @@ def test_single_alert_per_episode_then_realert_then_recovery(storage, config):
     # still blind just past 12h after the first alert -> second alert
     _blind(storage, config, s, [65 + 12 * 60 + 5])
     assert len(s.messages) == 2
-    # data returns
+    # data returns: one fresh cycle is NOT yet a recovery (sustained freshness)
     back = NOW + timedelta(minutes=65 + 12 * 60 + 15)
     _run(storage, config, _flat(back - timedelta(minutes=1)), s, now=back)
+    assert len(s.messages) == 2
+    # ...30 min of continuously fresh cycles is
+    for m in range(5, 35, 5):
+        n = back + timedelta(minutes=m)
+        _run(storage, config, _flat(n - timedelta(minutes=1)), s, now=n)
     assert len(s.messages) == 3
     assert "flowing again" in s.messages[2].lower()
-    # one more fresh cycle -> no further recovery note
-    nxt = back + timedelta(minutes=5)
-    _run(storage, config, _flat(nxt - timedelta(minutes=1)), s, now=nxt)
+    # more fresh cycles -> no further recovery note
+    for m in range(35, 60, 5):
+        n = back + timedelta(minutes=m)
+        _run(storage, config, _flat(n - timedelta(minutes=1)), s, now=n)
     assert len(s.messages) == 3
     p = _state(storage).payload
-    assert "stale_alert_sent_at" not in p and "stale_since" not in p
+    assert "stale_since" not in p and "recovery_pending" not in p
+    assert "stale_alert_sent_at" in p  # kept across episodes (hysteresis)
 
 
 def test_short_gap_no_alert_no_recovery(storage, config):
@@ -353,7 +360,9 @@ def test_messages_contain_no_pii(storage, config, monkeypatch):
     _run(storage, config, _flat(), s, now=NOW)
     _blind(storage, config, s, [90])
     back = NOW + timedelta(minutes=100)
-    _run(storage, config, _flat(back - timedelta(minutes=1)), s, now=back)
+    for m in range(0, 40, 5):
+        n = back + timedelta(minutes=m)
+        _run(storage, config, _flat(n - timedelta(minutes=1)), s, now=n)
     blob = " ".join(s.messages)
     assert len(s.messages) == 2
     assert "someone" not in blob and "@" not in blob
@@ -381,3 +390,134 @@ def test_summarize_handles_missing_and_legacy_state():
     legacy = FetchState("live_cron", None, NOW, {}, "pydexcom")
     s = summarize_live_state(legacy, NOW, "America/Los_Angeles", cfg)
     assert s is not None and s.last_outcome is None and s.today_counts == {}
+
+
+# ── review follow-ups: persist-before-send, hysteresis, fetch errors ─────
+
+
+class FlakyWrites(InMemoryStorage):
+    """set_fetch_state raises while ``fail`` is true (optionally only after
+    ``ok_writes`` more successful writes)."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail = False
+        self.ok_writes: int | None = None
+
+    def set_fetch_state(self, source_id, state):
+        if self.ok_writes is not None:
+            if self.ok_writes <= 0:
+                raise RuntimeError("db write failed")
+            self.ok_writes -= 1
+        elif self.fail:
+            raise RuntimeError("db write failed")
+        super().set_fetch_state(source_id, state)
+
+
+def test_no_stale_alert_when_marker_cannot_be_persisted(config):
+    st = FlakyWrites()
+    s = Sender()
+    _run(st, config, _flat(), s, now=NOW)
+    st.fail = True
+    _blind(st, config, s, [m for m in range(5, 200, 5)])  # >3h of blind cycles
+    assert s.messages == []  # fails toward fewer messages
+
+
+def test_failed_send_with_failed_revert_does_not_repeat(config):
+    st = FlakyWrites()
+    bad = Sender(ok=False)
+    _run(st, config, _flat(), bad, now=NOW)
+    # allow exactly one write (the marker) then fail every later write,
+    # including the best-effort revert after the failed send.
+    st.ok_writes = 1
+    _blind(st, config, bad, [m for m in range(65, 400, 5)])
+    assert len(bad.messages) == 1
+
+
+@pytest.mark.parametrize("gap_min", [70, 90])
+def test_sparse_readings_do_not_flap(storage, config, gap_min):
+    """A reading every gap_min (just over the 60-min threshold) for 24h."""
+    s = Sender()
+    for step in range(0, 24 * 12 + 1):
+        t = NOW + timedelta(minutes=5 * step)
+        elapsed = 5 * step
+        newest = NOW + timedelta(minutes=(elapsed // gap_min) * gap_min)
+        _run(storage, config, _cgm([120], newest), s, now=t)
+    assert len(s.messages) <= 3
+    assert sum("No Dexcom" in m for m in s.messages) == 2  # 1h, 13h
+    assert not any("flowing again" in m for m in s.messages)
+
+
+def test_new_episode_within_realert_window_is_suppressed(storage, config):
+    s = Sender()
+    _run(storage, config, _flat(), s, now=NOW)
+    _blind(storage, config, s, [65])
+    assert len(s.messages) == 1
+    # sustained recovery (35 min of fresh cycles) -> recovery note
+    for m in range(70, 110, 5):
+        n = NOW + timedelta(minutes=m)
+        _run(storage, config, _flat(n - timedelta(minutes=1)), s, now=n)
+    assert len(s.messages) == 2
+    # a second blind episode 3h later: within 12h of the last alert -> silent
+    later = NOW + timedelta(minutes=110 + 180)
+    _run(storage, config, _flat(later - timedelta(minutes=1)), s, now=later)
+    for m in (5, 70, 100):
+        _run(storage, config, _empty(), s, now=later + timedelta(minutes=m))
+    assert len(s.messages) == 2
+    # ...and no recovery note for the suppressed episode
+    back = later + timedelta(minutes=120)
+    for m in range(0, 40, 5):
+        n = back + timedelta(minutes=m)
+        _run(storage, config, _flat(n - timedelta(minutes=1)), s, now=n)
+    assert len(s.messages) == 2
+
+
+def test_three_day_outage_realerts_every_12h(storage, config):
+    s = Sender()
+    _run(storage, config, _flat(), s, now=NOW)
+    for step in range(1, 3 * 24 * 12 + 1):
+        _run(storage, config, _empty(), s, now=NOW + timedelta(minutes=5 * step))
+    assert len(s.messages) == 6  # ~1h, 13h, 25h, 37h, 49h, 61h
+
+
+def test_heartbeat_not_advanced_when_evaluation_raises(storage, config, monkeypatch):
+    s = Sender()
+    _run(storage, config, _flat(), s, now=NOW)
+
+    def boom(*a, **k):
+        raise RuntimeError("detector exploded")
+
+    monkeypatch.setattr(cron, "detect_meal_rise", boom)
+    later = NOW + timedelta(minutes=5)
+    code = _run(storage, config, _flat(later - timedelta(minutes=1)), s, now=later)
+    assert code == 1
+    st = _state(storage)
+    assert st.last_fetched_at == NOW  # not advanced: evaluation did not complete
+    assert st.payload["last_outcome"] == "error"
+
+
+def test_fetch_errors_do_not_send_g7_stale_alert(storage, config):
+    s = Sender()
+    _run(storage, config, _flat(), s, now=NOW)
+
+    def boom():
+        raise RuntimeError("auth failed")
+
+    for m in range(5, 200, 5):
+        cron.run_cron(
+            now=NOW + timedelta(minutes=m),
+            storage=storage,
+            config=config,
+            fetch_cgm=boom,
+            send=s,
+        )
+    assert not any("No Dexcom" in m for m in s.messages)
+    assert any("worker error" in m.lower() for m in s.messages)  # existing alert
+    assert _state(storage).payload["last_outcome"] == "error"
+    assert _state(storage).last_fetched_at == NOW
+
+
+def test_config_recovery_knob_default():
+    assert LiveHealthConfig.from_raw({}).cgm_recovery_fresh_minutes == 30
+    with pytest.raises(ValueError):
+        LiveHealthConfig.from_raw({"cgm_recovery_fresh_minutes": 0})

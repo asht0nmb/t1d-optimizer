@@ -483,12 +483,14 @@ def run_cron(
                 retry_summary["succeeded"],
             )
 
-        # 3. Fetch recent CGM (a raise here counts as "no CGM feed")
-        report.cgm_state = "none"
+        # 3. Fetch recent CGM. A raise here (auth/network) is a fetch error,
+        # not evidence that the G7 is disconnected: it gets no stale alert.
+        report.cgm_state = "fetch_error"
         if fetch_cgm is not None:
             cgm_df = fetch_cgm()
         else:
             cgm_df = fetch_dexcom_cgm(config.meal_rise, tz_name)
+        report.cgm_state = "none"
         if cgm_df.empty:
             logger.warning("CGM data is empty; exiting.")
             report.outcome = "no_data"
