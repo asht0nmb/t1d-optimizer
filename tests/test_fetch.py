@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from ingestion import fetch
+from ingestion.client import FetchResult
 
 PST = timezone(timedelta(hours=-8))
 
@@ -45,7 +46,7 @@ def patched_fetch(monkeypatch, three_pumps):
     container.get_api = MagicMock(return_value=MagicMock(name="api"))
     container.get_pump_metadata = MagicMock(return_value=three_pumps)
     # Default: each fetch returns no events, last end = None
-    container.fetch_pump_events = MagicMock(return_value=([], None))
+    container.fetch_pump_events = MagicMock(return_value=FetchResult([], None))
     container.build_all = MagicMock(return_value={})
     container.save_df = MagicMock()
     container.load_fetch_state = MagicMock(return_value={})
@@ -100,8 +101,8 @@ class TestRunFullFetch:
         # First pump produces real events, others none.
         def _fetch_side_effect(api, device_id, start, end, pump_serial):
             if pump_serial == "SN_A":
-                return ([MagicMock()], end)
-            return ([], None)
+                return FetchResult([MagicMock()], end)
+            return FetchResult([], None)
 
         patched_fetch.fetch_pump_events.side_effect = _fetch_side_effect
         patched_fetch.build_all.return_value = {
@@ -120,7 +121,7 @@ class TestRunFullFetch:
 
     def test_build_all_skipped_when_no_events(self, patched_fetch):
         """_process_pump returns early if events list is empty ⇒ no build_all, no save."""
-        patched_fetch.fetch_pump_events.return_value = ([], None)
+        patched_fetch.fetch_pump_events.return_value = FetchResult([], None)
 
         fetch.run_full_fetch()
 
@@ -133,7 +134,7 @@ class TestRunFullFetch:
 
         def _fetch_side_effect(api, device_id, start, end, pump_serial):
             # Simulate successful fetch with last-chunk end = the requested end date
-            return ([MagicMock()], end)
+            return FetchResult([MagicMock()], end)
 
         patched_fetch.fetch_pump_events.side_effect = _fetch_side_effect
         patched_fetch.build_all.return_value = {"cgm": non_empty}
@@ -214,7 +215,7 @@ class TestRunIncrementalFetch:
 class TestRunDayFetch:
     def test_uses_only_active_pump(self, patched_fetch, three_pumps):
         """run_day_fetch fetches from metadata[-1] (the newest pump) exactly once."""
-        patched_fetch.fetch_pump_events.return_value = ([], None)
+        patched_fetch.fetch_pump_events.return_value = FetchResult([], None)
 
         fetch.run_day_fetch("2026-02-15")
 
@@ -225,7 +226,7 @@ class TestRunDayFetch:
         assert call.kwargs["pump_serial"] == str(active["serialNumber"])
 
     def test_date_range_is_plus_minus_one_day(self, patched_fetch):
-        patched_fetch.fetch_pump_events.return_value = ([], None)
+        patched_fetch.fetch_pump_events.return_value = FetchResult([], None)
 
         fetch.run_day_fetch("2026-02-15")
 
@@ -235,10 +236,7 @@ class TestRunDayFetch:
 
     def test_does_not_update_fetch_state(self, patched_fetch):
         """Per HANDOFF.md: day fetch never writes fetch state (not even empty)."""
-        patched_fetch.fetch_pump_events.return_value = (
-            [MagicMock()],
-            "2026-02-16",
-        )
+        patched_fetch.fetch_pump_events.return_value = FetchResult([MagicMock()], "2026-02-16")
         patched_fetch.build_all.return_value = {
             "cgm": _cgm_df(rows=1, serial="SN_C"),
         }
@@ -249,7 +247,7 @@ class TestRunDayFetch:
 
     def test_saves_non_empty_dataframes(self, patched_fetch):
         non_empty = _cgm_df(rows=3, serial="SN_C")
-        patched_fetch.fetch_pump_events.return_value = ([MagicMock()], "2026-02-16")
+        patched_fetch.fetch_pump_events.return_value = FetchResult([MagicMock()], "2026-02-16")
         patched_fetch.build_all.return_value = {
             "cgm": non_empty,
             "bolus": pd.DataFrame(),
@@ -263,7 +261,7 @@ class TestRunDayFetch:
         assert df.equals(non_empty)
 
     def test_no_events_skips_build_and_save(self, patched_fetch):
-        patched_fetch.fetch_pump_events.return_value = ([], None)
+        patched_fetch.fetch_pump_events.return_value = FetchResult([], None)
 
         fetch.run_day_fetch("2026-02-15")
 
@@ -281,7 +279,7 @@ class TestProcessPump:
     def test_empty_events_short_circuits(self, patched_fetch):
         """No events returned ⇒ no build_all, no save_df, no state mutation."""
         state = {}
-        patched_fetch.fetch_pump_events.return_value = ([], None)
+        patched_fetch.fetch_pump_events.return_value = FetchResult([], None)
 
         fetch._process_pump(
             api=MagicMock(),
@@ -298,10 +296,7 @@ class TestProcessPump:
 
     def test_state_updated_with_last_successful_end(self, patched_fetch):
         state = {}
-        patched_fetch.fetch_pump_events.return_value = (
-            [MagicMock()],
-            "2023-06-30",
-        )
+        patched_fetch.fetch_pump_events.return_value = FetchResult([MagicMock()], "2023-06-30")
         patched_fetch.build_all.return_value = {
             "cgm": _cgm_df(rows=1, serial="SN_A"),
         }
@@ -323,7 +318,7 @@ class TestProcessPump:
         ts_last = ts0 + timedelta(minutes=5 * 9)  # 10 rows
         df = _cgm_df(rows=10, serial="SN_A", start_ts=ts0)
 
-        patched_fetch.fetch_pump_events.return_value = ([MagicMock()], "2024-06-30")
+        patched_fetch.fetch_pump_events.return_value = FetchResult([MagicMock()], "2024-06-30")
         patched_fetch.build_all.return_value = {"cgm": df}
 
         fetch._process_pump(
@@ -341,7 +336,7 @@ class TestProcessPump:
     def test_saves_only_non_empty_frames(self, patched_fetch):
         state = {}
         non_empty = _cgm_df(rows=2, serial="SN_A")
-        patched_fetch.fetch_pump_events.return_value = ([MagicMock()], "2024-06-30")
+        patched_fetch.fetch_pump_events.return_value = FetchResult([MagicMock()], "2024-06-30")
         patched_fetch.build_all.return_value = {
             "cgm": non_empty,
             "bolus": pd.DataFrame(),
@@ -369,10 +364,7 @@ class TestProcessPump:
         but this test pins the behavior.
         """
         state = {}
-        patched_fetch.fetch_pump_events.return_value = (
-            [MagicMock()],
-            None,  # falsy
-        )
+        patched_fetch.fetch_pump_events.return_value = FetchResult([MagicMock()], None)
         patched_fetch.build_all.return_value = {
             "cgm": _cgm_df(rows=1, serial="SN_A"),
         }

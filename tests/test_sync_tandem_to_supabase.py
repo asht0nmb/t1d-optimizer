@@ -15,6 +15,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.storage.records import FetchState, UpsertResult
+from ingestion import redaction, sync_health
+from ingestion.client import FetchResult
 from scripts import sync_tandem_to_supabase as sync
 
 PST = timezone(timedelta(hours=-8))
@@ -71,6 +73,20 @@ def _enriched_dfs(serial: str = "SN_A") -> dict[str, pd.DataFrame]:
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_real_network_or_state(monkeypatch):
+    """Hard guard: no test in this module may reach Telegram, and the global
+    redaction registry never leaks between tests."""
+    def _boom(*a, **k):
+        raise AssertionError("real network call attempted in test")
+
+    monkeypatch.setattr(sync_health.requests, "post", _boom)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    redaction.clear_secrets()
+    yield
+    redaction.clear_secrets()
+
+
 @pytest.fixture
 def mock_config() -> dict:
     return {"site_change_detection": {}}
@@ -87,7 +103,9 @@ def patched_sync(monkeypatch, mock_config):
     container.get_pump_metadata = MagicMock(
         return_value=[_make_pump("SN_A", 1, "2023-01-01", "2024-06-30")]
     )
-    container.fetch_pump_events = MagicMock(return_value=([MagicMock()], "2024-06-29"))
+    container.fetch_pump_events = MagicMock(
+        return_value=FetchResult([MagicMock()], "2024-06-29", chunks_total=1)
+    )
     container.build_all = MagicMock(return_value=_enriched_dfs())
     container.load_config = MagicMock(return_value=mock_config)
 
@@ -108,6 +126,8 @@ def patched_sync(monkeypatch, mock_config):
     monkeypatch.setattr(sync, "build_all", container.build_all)
     monkeypatch.setattr(sync, "load_config", container.load_config)
     monkeypatch.setattr(sync, "_connect_storage", container.connect_storage)
+    container.send_telegram = MagicMock(return_value=True)
+    monkeypatch.setattr(sync, "send_telegram", container.send_telegram)
 
     return container
 
@@ -309,3 +329,322 @@ class TestAuthFailure:
         patched_sync.get_api.side_effect = RuntimeError("auth failed")
 
         assert sync.run_sync(dry_run=False) != 0
+
+
+# ---------------------------------------------------------------------------
+# Fail loud + bookmark correctness
+# ---------------------------------------------------------------------------
+
+
+def _saved_payloads(patched_sync) -> list[dict]:
+    return [c.args[1].payload for c in patched_sync.storage.set_fetch_state.call_args_list]
+
+
+def _state(payload: dict) -> FetchState:
+    return FetchState(
+        source_id="SN_A",
+        last_cursor=None,
+        last_fetched_at=datetime(2024, 6, 1, tzinfo=UTC),
+        payload=payload,
+        source_kind="tconnectsync",
+    )
+
+
+class TestFailLoud:
+    def test_clean_run_exits_zero(self, patched_sync):
+        assert sync.run_sync(dry_run=False) == 0
+
+    def test_any_failed_chunk_exits_nonzero_after_persisting(self, patched_sync):
+        patched_sync.fetch_pump_events.return_value = FetchResult(
+            [MagicMock()], "2024-06-01", chunks_total=3, chunks_failed=1,
+            failed_ranges=["2024-06-01 → 2024-07-01"],
+        )
+
+        assert sync.run_sync(dry_run=False) != 0
+
+        # What succeeded was still persisted before the non-zero exit.
+        patched_sync.storage.upsert_table.assert_called()
+        patched_sync.storage.set_fetch_state.assert_called()
+        patched_sync.storage.set_pipeline_version.assert_called_once()
+
+    def test_all_chunks_failed_no_events_exits_nonzero(self, patched_sync):
+        patched_sync.fetch_pump_events.return_value = FetchResult(
+            [], None, chunks_total=2, chunks_failed=2,
+        )
+
+        assert sync.run_sync(dry_run=False) != 0
+        patched_sync.storage.set_fetch_state.assert_not_called()
+
+    def test_dry_run_with_failed_chunks_also_nonzero(self, patched_sync):
+        patched_sync.fetch_pump_events.return_value = FetchResult(
+            [], None, chunks_total=1, chunks_failed=1,
+        )
+        assert sync.run_sync(dry_run=True) != 0
+
+    def test_failure_in_one_pump_does_not_block_the_other(self, patched_sync):
+        patched_sync.get_pump_metadata.return_value = [
+            _make_pump("SN_A", 1, "2023-01-01", "2024-06-30"),
+            _make_pump("SN_B", 2, "2024-01-01", "2024-12-31"),
+        ]
+        patched_sync.fetch_pump_events.side_effect = [
+            FetchResult([], None, chunks_total=1, chunks_failed=1),
+            FetchResult([MagicMock()], "2024-12-30", chunks_total=1),
+        ]
+
+        assert sync.run_sync(dry_run=False) != 0
+
+        serials = [c.args[0] for c in patched_sync.storage.set_fetch_state.call_args_list]
+        assert serials == ["SN_B"]
+
+
+class TestBookmarkContiguity:
+    def test_bookmark_stops_before_first_failed_chunk(self, patched_sync):
+        # A later chunk succeeded (its events are kept) but the bookmark is
+        # only the end of the contiguous successful prefix.
+        patched_sync.fetch_pump_events.return_value = FetchResult(
+            [MagicMock(), MagicMock()], "2024-05-01", chunks_total=3, chunks_failed=1,
+        )
+        sync.run_sync(dry_run=False)
+        assert _saved_payloads(patched_sync)[-1]["last_successful_chunk_end"] == "2024-05-01"
+
+    def test_first_chunk_failed_keeps_previous_bookmark(self, patched_sync):
+        patched_sync.storage.get_fetch_state.return_value = _state(
+            {"last_successful_chunk_end": "2024-05-20"}
+        )
+        patched_sync.fetch_pump_events.return_value = FetchResult(
+            [MagicMock()], None, chunks_total=2, chunks_failed=1,
+        )
+
+        assert sync.run_sync(dry_run=False) != 0
+
+        payload = _saved_payloads(patched_sync)[-1]
+        assert payload["last_successful_chunk_end"] == "2024-05-20"
+
+    def test_first_chunk_failed_no_prior_bookmark_omits_key(self, patched_sync):
+        patched_sync.fetch_pump_events.return_value = FetchResult(
+            [MagicMock()], None, chunks_total=2, chunks_failed=1,
+        )
+        sync.run_sync(dry_run=False)
+        assert "last_successful_chunk_end" not in _saved_payloads(patched_sync)[-1]
+
+    def test_bookmark_never_moves_backward(self, patched_sync):
+        patched_sync.storage.get_fetch_state.return_value = _state(
+            {"last_successful_chunk_end": "2024-06-20"}
+        )
+        patched_sync.fetch_pump_events.return_value = FetchResult(
+            [MagicMock()], "2024-05-01", chunks_total=1,
+        )
+        sync.run_sync(dry_run=False, start="2024-04-01")
+        assert _saved_payloads(patched_sync)[-1]["last_successful_chunk_end"] == "2024-06-20"
+
+    def test_bookmark_advances_when_all_ok(self, patched_sync):
+        patched_sync.storage.get_fetch_state.return_value = _state(
+            {"last_successful_chunk_end": "2024-05-20"}
+        )
+        sync.run_sync(dry_run=False)
+        assert _saved_payloads(patched_sync)[-1]["last_successful_chunk_end"] == "2024-06-29"
+
+
+# ---------------------------------------------------------------------------
+# Staleness alerts
+# ---------------------------------------------------------------------------
+
+NOW = datetime(2026, 10, 14, 6, 0, tzinfo=UTC)
+
+
+def _pump_with_upload(serial: str, max_date: str, hours_ago: float | None) -> dict:
+    pump = _make_pump(serial, "uuid-" + serial, "2023-01-01", max_date)
+    if hours_ago is not None:
+        pump["lastUploadDate"] = (NOW - timedelta(hours=hours_ago)).isoformat()
+    return pump
+
+
+def _cgm_basal_dfs(cgm_hours_ago, basal_hours_ago) -> dict[str, pd.DataFrame]:
+    dfs = _enriched_dfs()
+    dfs["cgm"] = pd.DataFrame(
+        {
+            "pump_serial": "SN_AAAA",
+            "seqnum": range(len(cgm_hours_ago)),
+            "timestamp": [NOW - timedelta(hours=h) for h in cgm_hours_ago],
+        }
+    )
+    dfs["basal"] = pd.DataFrame(
+        {
+            "pump_serial": "SN_AAAA",
+            "rate": 0.8,
+            "timestamp": [NOW - timedelta(hours=h) for h in basal_hours_ago],
+        }
+    )
+    return dfs
+
+
+@pytest.fixture
+def at_now(monkeypatch):
+    monkeypatch.setattr(sync, "_utcnow", lambda: NOW)
+
+
+class TestUploadStalenessAlert:
+    def test_stale_upload_sends_specific_alert_exit_zero(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 50)
+        ]
+        assert sync.run_sync(dry_run=False) == 0
+        patched_sync.send_telegram.assert_called_once()
+        text = patched_sync.send_telegram.call_args.args[0]
+        assert "~50h" in text and "t:connect app" in text
+
+    def test_fresh_upload_sends_nothing(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 2)
+        ]
+        assert sync.run_sync(dry_run=False) == 0
+        patched_sync.send_telegram.assert_not_called()
+
+    def test_telegram_delivery_failure_exits_nonzero(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 50)
+        ]
+        patched_sync.send_telegram.return_value = False
+        assert sync.run_sync(dry_run=False) != 0
+
+    def test_dry_run_never_sends(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 50)
+        ]
+        assert sync.run_sync(dry_run=True) == 0
+        patched_sync.send_telegram.assert_not_called()
+
+    def test_threshold_comes_from_config(self, patched_sync, at_now, mock_config):
+        mock_config["sync_health"] = {"max_pump_upload_age_hours": 100}
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 50)
+        ]
+        sync.run_sync(dry_run=False)
+        patched_sync.send_telegram.assert_not_called()
+
+    def test_active_pump_is_the_one_with_latest_data(self, patched_sync, at_now):
+        # Old pump (stale upload) must not alert; the active pump is fresh.
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_OLD1", "2024-01-01", 5000),
+            _pump_with_upload("SN_NEW1", "2026-10-13", 1),
+        ]
+        sync.run_sync(dry_run=False)
+        patched_sync.send_telegram.assert_not_called()
+
+    def test_active_pump_chosen_before_only_filter(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_OLD1", "2024-01-01", 5000),
+            _pump_with_upload("SN_NEW1", "2026-10-13", 1),
+        ]
+        sync.run_sync(dry_run=False, only_serial="SN_OLD1")
+        patched_sync.send_telegram.assert_not_called()
+
+    def test_alert_sent_even_if_sync_crashes(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 50)
+        ]
+        patched_sync.fetch_pump_events.side_effect = RuntimeError("boom")
+        assert sync.run_sync(dry_run=False) != 0
+        patched_sync.send_telegram.assert_called_once()
+
+    def test_alert_text_has_no_identifiers(self, patched_sync, at_now):
+        pump = _pump_with_upload("SN_AAAA", "2026-10-13", 50)
+        patched_sync.get_pump_metadata.return_value = [pump]
+        sync.run_sync(dry_run=False)
+        text = patched_sync.send_telegram.call_args.args[0]
+        assert "SN_AAAA" not in text and pump["tconnectDeviceId"] not in text
+
+
+class TestPumpCgmGapAlert:
+    def test_gap_on_active_pump_alerts(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 1)
+        ]
+        patched_sync.build_all.return_value = _cgm_basal_dfs([], [30, 20, 10, 0])
+        assert sync.run_sync(dry_run=False) == 0
+        patched_sync.send_telegram.assert_called_once()
+        assert "G7" in patched_sync.send_telegram.call_args.args[0]
+
+    def test_no_gap_no_alert(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 1)
+        ]
+        patched_sync.build_all.return_value = _cgm_basal_dfs([3, 2, 1, 0], [3, 2, 1, 0])
+        sync.run_sync(dry_run=False)
+        patched_sync.send_telegram.assert_not_called()
+
+    def test_gap_check_skipped_for_non_active_pump(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_OLD1", "2024-01-01", 1),
+            _pump_with_upload("SN_NEW1", "2026-10-13", 1),
+        ]
+        old_gap = _cgm_basal_dfs([], [30, 0])
+        ok = _cgm_basal_dfs([1, 0], [1, 0])
+        patched_sync.build_all.side_effect = [old_gap, ok]
+        sync.run_sync(dry_run=False)
+        patched_sync.send_telegram.assert_not_called()
+
+    def test_gap_dry_run_does_not_send(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 1)
+        ]
+        patched_sync.build_all.return_value = _cgm_basal_dfs([], [30, 0])
+        assert sync.run_sync(dry_run=True) == 0
+        patched_sync.send_telegram.assert_not_called()
+
+    def test_both_alerts_two_messages(self, patched_sync, at_now):
+        patched_sync.get_pump_metadata.return_value = [
+            _pump_with_upload("SN_AAAA", "2026-10-13", 50)
+        ]
+        patched_sync.build_all.return_value = _cgm_basal_dfs([], [30, 0])
+        sync.run_sync(dry_run=False)
+        assert patched_sync.send_telegram.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Redaction wiring
+# ---------------------------------------------------------------------------
+
+
+class TestRedactionWiring:
+    def test_serials_registered_and_masked_in_logs(self, patched_sync, caplog):
+        serial = "SN_SECRET_12345678"
+        patched_sync.get_pump_metadata.return_value = [
+            _make_pump(serial, 1, "2023-01-01", "2024-06-30")
+        ]
+        with caplog.at_level("INFO"):
+            sync.run_sync(dry_run=False)
+        assert redaction.redact(f"x {serial} y") == "x …5678 y"
+        assert all(serial not in r.getMessage() for r in caplog.records)
+
+    def test_add_mask_emitted_in_actions(self, patched_sync, monkeypatch, capsys):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        serial = "SN_SECRET_12345678"
+        patched_sync.get_pump_metadata.return_value = [
+            _make_pump(serial, "uuid-device-1", "2023-01-01", "2024-06-30")
+        ]
+        sync.run_sync(dry_run=True)
+        out = capsys.readouterr().out
+        assert f"::add-mask::{serial}" in out
+        assert "::add-mask::uuid-device-1" in out
+
+    def test_no_add_mask_outside_actions(self, patched_sync, capsys):
+        sync.run_sync(dry_run=True)
+        assert "::add-mask::" not in capsys.readouterr().out
+
+    def test_only_serial_not_found_logs_masked(self, patched_sync, caplog):
+        with caplog.at_level("INFO"):
+            rc = sync.run_sync(dry_run=False, only_serial="ABCDEFGH99999")
+        assert rc != 0
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "ABCDEFGH99999" not in text
+        assert "…9999" in text
+
+    def test_main_installs_redacting_logging(self, monkeypatch):
+        called = {}
+        monkeypatch.setattr(
+            sync.redaction, "configure_logging", lambda **k: called.setdefault("ok", True)
+        )
+        monkeypatch.setattr(sync, "run_sync", lambda **k: 0)
+        assert sync.main(["--dry-run"]) == 0
+        assert called.get("ok") is True
