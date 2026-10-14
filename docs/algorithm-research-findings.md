@@ -209,3 +209,23 @@ The owner was explicit that the five workstreams are a starting order, not exhau
 7. A deliberate, owner-reviewed decision on whether/how `detection/episode_boundary.py`'s trajectory tracking should inform episode-boundary detection for M1/M2 — this phase built and tested the primitive, not the integration.
 
 **Status:** this entire branch is exploratory. Per the task brief, it must not be merged without the owner's own review, since it touches detection-adjacent territory even though nothing here is wired into a live or nightly path yet. `config/user_config.yaml` was not touched; no existing detection threshold was changed.
+
+---
+
+## Parameters moved to config
+
+Review of PR #10 flagged hardcoded personal/physiological parameters (CLAUDE.md: never hardcode thresholds). They now live in an optional `research_detection:` block in `config/user_config.yaml` (research only, not wired into production), loaded into `AppConfig.research_detection` (`ResearchDetectionConfig`). Values are unchanged from the prior in-code defaults; choosing them remains the owner's call.
+
+| Parameter | Config key | Value |
+|---|---|---|
+| Insulin duration | `research_detection.iob.dia_hours` | 5.0 |
+| Insulin peak | `research_detection.iob.peak_minutes` | 75.0 |
+| Basal baseline lookback | `research_detection.iob.baseline_lookback_days` | 7 |
+| Noise band | `research_detection.deviation_categorize.noise_band_mgdl` | 5.0 |
+| Bolus lookback | `...bolus_lookback_minutes` | 180.0 |
+| Bolus lookahead | `...bolus_lookahead_minutes` | 20.0 |
+| Algorithm lookback | `...algorithm_lookback_minutes` | 15.0 |
+
+The modules still accept `IobCurveConfig` / `CategorizeConfig` objects (signatures unchanged); their dataclass defaults mirror the YAML and a test asserts they stay in sync. `build_dose_events(baseline_lookback_days=None)` now resolves to the config default.
+
+Deliberately left in code: `MIN_VALID_BG = 39` (Dexcom display floor, a device constant), the oref bucket boundaries (2.5/17.5/42.5 min) and the `* 5.0` five-minute normalization (algorithm/sampling constants), and `ISF`, which `DeviationConfig` already requires explicitly with no default.

@@ -117,6 +117,10 @@ CAT_UNKNOWN = "unknown"  # deviation itself is NaN (unwarmed/no-delta row)
 class CategorizeConfig:
     """Thresholds for ``categorize_deviations``.
 
+    Defaults mirror ``research_detection.deviation_categorize`` in
+    ``config/user_config.yaml``; callers should build this from
+    ``AppConfig.research_detection.deviation_categorize``.
+
     ``noise_band_mgdl``: deviations within ``±noise_band_mgdl`` of zero are
     "baseline" regardless of nearby bolus/algorithm activity — a
     perfectly-explained reading needs no further categorization even if a

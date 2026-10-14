@@ -12,7 +12,7 @@ contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,7 @@ __all__ = [
     "MealDetectionConfig",
     "MealRiseConfig",
     "MealRiseCalibrationConfig",
+    "ResearchDetectionConfig",
     "SiteChangeDetectionConfig",
     "get_config",
     "load_config",
@@ -97,6 +98,8 @@ class SiteChangeDetectionConfig:
 
 
 from core.detection.meal_rise import MealRiseConfig
+from detection.deviation_categorize import CategorizeConfig
+from detection.iob import IobCurveConfig
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,18 @@ class MealRiseCalibrationConfig:
 
 
 @dataclass(frozen=True)
+class ResearchDetectionConfig:
+    """Research-branch parameters (IOB curve, deviation categorization).
+
+    NOT wired into production. Optional block: absent keys fall back to the
+    dataclass defaults, so configs without ``research_detection`` still load.
+    """
+
+    iob: IobCurveConfig = field(default_factory=IobCurveConfig)
+    deviation_categorize: CategorizeConfig = field(default_factory=CategorizeConfig)
+
+
+@dataclass(frozen=True)
 class AppConfig:
     bg_targets: BgTargets
     meal_detection: MealDetectionConfig
@@ -123,6 +138,9 @@ class AppConfig:
     meal_rise_calibration: MealRiseCalibrationConfig
     timezone: str
     raw: dict
+    research_detection: ResearchDetectionConfig = field(
+        default_factory=ResearchDetectionConfig
+    )
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -164,6 +182,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         meal_rise_calibration=meal_rise_calibration,
         timezone=timezone,
         raw=raw,
+        research_detection=_parse_research_detection(raw.get("research_detection") or {}),
     )
 
 
@@ -180,6 +199,43 @@ def get_config() -> AppConfig:
 # ---------------------------------------------------------------------------
 # Per-block parsers / validators
 # ---------------------------------------------------------------------------
+
+def _parse_research_detection(block: dict[str, Any]) -> ResearchDetectionConfig:
+    iob_b = block.get("iob") or {}
+    cat_b = block.get("deviation_categorize") or {}
+    d_iob, d_cat = IobCurveConfig(), CategorizeConfig()
+    iob = IobCurveConfig(
+        dia_hours=float(iob_b.get("dia_hours", d_iob.dia_hours)),
+        peak_minutes=float(iob_b.get("peak_minutes", d_iob.peak_minutes)),
+        baseline_lookback_days=int(
+            iob_b.get("baseline_lookback_days", d_iob.baseline_lookback_days)
+        ),
+    )
+    cat = CategorizeConfig(
+        noise_band_mgdl=float(cat_b.get("noise_band_mgdl", d_cat.noise_band_mgdl)),
+        bolus_lookback_minutes=float(
+            cat_b.get("bolus_lookback_minutes", d_cat.bolus_lookback_minutes)
+        ),
+        bolus_lookahead_minutes=float(
+            cat_b.get("bolus_lookahead_minutes", d_cat.bolus_lookahead_minutes)
+        ),
+        algorithm_lookback_minutes=float(
+            cat_b.get("algorithm_lookback_minutes", d_cat.algorithm_lookback_minutes)
+        ),
+    )
+    if not (0 < iob.peak_minutes < iob.dia_hours * 60 / 2):
+        raise ValueError(
+            "research_detection.iob: require 0 < peak_minutes < dia_hours*30, "
+            f"got peak={iob.peak_minutes}, dia_hours={iob.dia_hours}"
+        )
+    if iob.baseline_lookback_days <= 0:
+        raise ValueError("research_detection.iob.baseline_lookback_days: must be > 0")
+    for name in ("noise_band_mgdl", "bolus_lookback_minutes",
+                 "bolus_lookahead_minutes", "algorithm_lookback_minutes"):
+        if getattr(cat, name) < 0:
+            raise ValueError(f"research_detection.deviation_categorize.{name}: must be >= 0")
+    return ResearchDetectionConfig(iob=iob, deviation_categorize=cat)
+
 
 def _parse_bg_targets(block: dict[str, Any]) -> BgTargets:
     low = int(block["low"])

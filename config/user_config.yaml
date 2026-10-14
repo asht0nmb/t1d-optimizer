@@ -83,3 +83,19 @@ meal_rise_calibration:
   late_bolus_lookahead_minutes: 45    # food bolus up to this far after the rise start → late_bolused
   correction_lookahead_minutes: 180   # window to attribute an uncovered miss to a user/auto correction
 
+
+# RESEARCH parameters for the exploratory detection modules on
+# research/algorithm-improvements (detection/iob.py, detection/deviation_categorize.py).
+# NOT wired into production (live loop, nightly sync, dashboards). Values are the
+# prior in-code defaults, moved here unchanged; choosing/calibrating them is the
+# owner's call. Block is optional: missing keys fall back to the same defaults.
+research_detection:
+  iob:
+    dia_hours: 5.0                  # PLACEHOLDER insulin duration (hours); not calibrated
+    peak_minutes: 75.0              # PLACEHOLDER insulin activity peak (minutes)
+    baseline_lookback_days: 7       # trailing window for the rolling-median basal baseline
+  deviation_categorize:
+    noise_band_mgdl: 5.0            # |deviation| within this is "baseline"
+    bolus_lookback_minutes: 180.0   # bolus this far back can still explain a deviation
+    bolus_lookahead_minutes: 20.0   # late-bolus grace period
+    algorithm_lookback_minutes: 15.0  # recency window for algorithm-modulation tag

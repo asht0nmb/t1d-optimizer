@@ -84,6 +84,10 @@ class IobCurveConfig:
     before trusting absolute deviation values for anything beyond relative
     comparison.
 
+    Defaults mirror ``research_detection.iob`` in ``config/user_config.yaml``;
+    callers should build this from ``AppConfig.research_detection.iob`` rather
+    than relying on the literals (a test asserts they stay in sync).
+
     ``baseline_lookback_days`` controls the rolling-median "profile basal
     rate" surrogate (see ``basal_baseline_rate``) used because
     ``profileBasalRate``/``algorithmRate`` are not currently captured by
@@ -234,7 +238,7 @@ def build_dose_events(
     basal_df: pd.DataFrame,
     horizon_end: pd.Timestamp,
     suspension_df: pd.DataFrame | None = None,
-    baseline_lookback_days: int = 7,
+    baseline_lookback_days: int | None = None,
 ) -> pd.DataFrame:
     """Build a unified ``[timestamp, units, kind]`` dose-event stream.
 
@@ -261,6 +265,9 @@ def build_dose_events(
     events are event-driven / change-triggered, not fixed-cadence — see
     the findings doc's cadence open question).
     """
+    if baseline_lookback_days is None:
+        # Mirrors config/user_config.yaml research_detection.iob.baseline_lookback_days
+        baseline_lookback_days = IobCurveConfig().baseline_lookback_days
     events: list[dict] = []
 
     if bolus_df is not None and not bolus_df.empty:
