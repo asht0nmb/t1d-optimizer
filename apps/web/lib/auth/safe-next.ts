@@ -18,5 +18,9 @@ export function safeNextUrl(next: string | null, origin: string): URL {
   } catch {
     return fallback;
   }
+  // Dot-segments can normalize to a `//host` path (e.g. `/.//evil.com`,
+  // `/%2e%2e//evil.com`); Next's middleware adapter relativizes same-host
+  // Location headers, which would turn that into protocol-relative `//evil.com`.
+  if (url.pathname.startsWith("//")) return fallback;
   return url.origin === new URL(origin).origin ? url : fallback;
 }

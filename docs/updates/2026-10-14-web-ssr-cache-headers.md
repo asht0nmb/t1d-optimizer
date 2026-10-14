@@ -51,5 +51,26 @@ env cases; open-redirect cases (`@evil.com`, `//evil.com`, `/\evil.com`,
 and passing.
 
 Gates (apps/web): `npm ci`, `npm run lint` (0 errors; 1 pre-existing warning),
-`npx tsc --noEmit`, `npx vitest run` (152 passed), `next build` with the
+`npx tsc --noEmit`, `npx vitest run` (160 passed after review fixes), `next build` with the
 placeholder env from `.github/workflows/tests.yml`.
+
+## Review follow-ups (PR #18, approve-with-nits)
+
+1. **`safeNextUrl` dot-segment bypass:** `/.//evil.com`, `/..//evil.com`, and
+   `/%2e%2e//evil.com` normalize to pathname `//evil.com`. That is harmless in a
+   route handler, but Next's middleware adapter relativizes same-host
+   `Location` headers into a protocol-relative `//evil.com`. The fix rejects
+   any parsed `url.pathname` that starts with `//`, falling back to `/`.
+2. **Segment-bounded public paths:** `isPublicAuthPath` (now exported) matches
+   `/login` and `/login/...`, plus `/auth` and `/auth/...`. Previously, the bare
+   `startsWith` made `/authors` and `/loginx` public. This also applies in
+   fail-closed mode.
+3. **Signed-in `/login` bounce (pre-existing):** the redirect to `/` dropped a
+   just-rotated session cookie. It now copies `supabaseResponse`'s cookies and
+   the accumulated cache headers onto the redirect. With no refresh, the
+   redirect is unchanged: no `Set-Cookie` and no cache headers. The
+   unauthenticated `/login` redirect still carries nothing, because there is no
+   session to keep.
+
+There are 8 new or extended test cases, and all 8 fail against the
+pre-follow-up code.

@@ -61,6 +61,7 @@ import { NextRequest } from "next/server";
 import { proxy } from "@/proxy";
 import { GET as callback } from "@/app/auth/callback/route";
 import { safeNextUrl } from "@/lib/auth/safe-next";
+import { isPublicAuthPath } from "@/lib/supabase/middleware";
 
 function expectCacheHeaders(res: Response) {
   expect(res.headers.get("cache-control")).toBe(CACHE["Cache-Control"]);
@@ -120,6 +121,57 @@ describe("proxy: setAll cache headers", () => {
     const loc = new URL(res.headers.get("location")!);
     expect(loc.pathname).toBe("/login");
     expect(loc.searchParams.get("next")).toBe("/trends");
+  });
+});
+
+describe("proxy: public auth paths are segment-bounded", () => {
+  it("isPublicAuthPath", () => {
+    for (const p of ["/login", "/login/x", "/auth", "/auth/callback"]) {
+      expect(isPublicAuthPath(p), p).toBe(true);
+    }
+    for (const p of ["/authors", "/auth-x", "/loginx", "/login-help", "/"]) {
+      expect(isPublicAuthPath(p), p).toBe(false);
+    }
+  });
+
+  it("redirects /authors and /loginx to /login when unauthenticated", async () => {
+    for (const p of ["/authors", "/loginx"]) {
+      const res = await proxy(new NextRequest(`http://localhost${p}`));
+      expect(res.status, p).toBe(307);
+      expect(new URL(res.headers.get("location")!).pathname).toBe("/login");
+    }
+  });
+
+  it("fail-closed mode also treats /authors as protected", async () => {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    try {
+      const res = await proxy(new NextRequest("http://localhost/authors"));
+      expect(res.status).toBe(307);
+    } finally {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = url;
+    }
+  });
+});
+
+describe("proxy: signed-in /login bounce keeps refreshed session", () => {
+  it("copies rotated cookies and cache headers onto the redirect to /", async () => {
+    user = { id: "u1" };
+    writes = [CACHE];
+    const res = await proxy(new NextRequest("http://localhost/login"));
+    expect(res.status).toBe(307);
+    expect(new URL(res.headers.get("location")!).pathname).toBe("/");
+    expect(res.headers.get("set-cookie")).toContain("sb-x-auth-token=v");
+    expect(res.headers.get("set-cookie")).toContain("Path=/");
+    expectCacheHeaders(res);
+  });
+
+  it("no refresh -> plain redirect, no cookies or cache headers", async () => {
+    user = { id: "u1" };
+    const res = await proxy(new NextRequest("http://localhost/login"));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expectNoCacheHeaders(res);
   });
 });
 
@@ -214,6 +266,9 @@ describe("/auth/callback: next open-redirect guard", () => {
     "/\n/evil.com",
     " /evil.com",
     "javascript:alert(1)",
+    "/.//evil.com",
+    "/..//evil.com",
+    "/%2e%2e//evil.com",
   ];
 
   for (const next of hostile) {
@@ -224,6 +279,7 @@ describe("/auth/callback: next open-redirect guard", () => {
       const loc = new URL(res.headers.get("location")!);
       expect(loc.origin).toBe("http://localhost");
       expect(loc.host).toBe("localhost");
+      expect(loc.pathname.startsWith("//")).toBe(false);
     });
   }
 
@@ -262,5 +318,8 @@ describe("/auth/callback: next open-redirect guard", () => {
       "https://app.example/",
     );
     expect(safeNextUrl("/%2F%2Fevil.com", o).origin).toBe(o);
+    for (const n of ["/.//evil.com", "/..//evil.com", "/%2e%2e//evil.com"]) {
+      expect(safeNextUrl(n, o).href, n).toBe("https://app.example/");
+    }
   });
 });

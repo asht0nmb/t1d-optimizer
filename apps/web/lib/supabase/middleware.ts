@@ -8,8 +8,17 @@ export function hasSupabaseMiddlewareEnv(): boolean {
   );
 }
 
-function isPublicAuthPath(pathname: string): boolean {
-  return pathname.startsWith("/login") || pathname.startsWith("/auth");
+function isLoginPath(pathname: string): boolean {
+  return pathname === "/login" || pathname.startsWith("/login/");
+}
+
+/** /login, /login/..., /auth, /auth/... — segment-bounded (not /authors). */
+export function isPublicAuthPath(pathname: string): boolean {
+  return (
+    isLoginPath(pathname) ||
+    pathname === "/auth" ||
+    pathname.startsWith("/auth/")
+  );
 }
 
 function redirectToLogin(request: NextRequest) {
@@ -67,10 +76,9 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const isLogin = request.nextUrl.pathname.startsWith("/login");
+  const isLogin = isLoginPath(request.nextUrl.pathname);
 
-  // Redirects below intentionally do not carry the refreshed cookies (and so
-  // need no cache headers) — unchanged from prior behavior.
+  // The unauthenticated redirect has no session to carry.
   if (!user && !isPublicAuthPath(request.nextUrl.pathname)) {
     return redirectToLogin(request);
   }
@@ -78,7 +86,16 @@ export async function updateSession(request: NextRequest) {
   if (user && isLogin) {
     const url = request.nextUrl.clone();
     url.pathname = "/";
-    return NextResponse.redirect(url);
+    // Carry any just-refreshed (rotated) session cookies and their cache
+    // headers onto the redirect, otherwise the rotation is lost.
+    const redirect = NextResponse.redirect(url);
+    supabaseResponse.cookies
+      .getAll()
+      .forEach((cookie) => redirect.cookies.set(cookie));
+    Object.entries(cacheHeaders).forEach(([key, value]) =>
+      redirect.headers.set(key, value),
+    );
+    return redirect;
   }
 
   return supabaseResponse;
