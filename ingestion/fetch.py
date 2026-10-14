@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 from .builders import build_all
 from .client import fetch_pump_events, get_api, get_pump_metadata
+from .redaction import mask_serial
 from .enrich import load_config
 from .storage import clean_all, load_fetch_state, save_df, save_fetch_state
 
@@ -28,7 +29,7 @@ def run_full_fetch() -> None:
         start = pump["minDateWithEvents"][:10]
         end = pump["maxDateWithEvents"][:10]
 
-        logger.info("Pump %s: fetching full range %s → %s", serial, start, end)
+        logger.info("Pump %s: fetching full range %s → %s", mask_serial(serial), start, end)
         _process_pump(api, device_id, serial, start, end, state, config)
 
     save_fetch_state(state)
@@ -55,11 +56,11 @@ def run_incremental_fetch() -> None:
         if last_end is None:
             # No state for this pump — do a full fetch
             start = pump["minDateWithEvents"][:10]
-            logger.info("Pump %s: no prior state, fetching full range %s → %s", serial, start, max_date)
+            logger.info("Pump %s: no prior state, fetching full range %s → %s", mask_serial(serial), start, max_date)
         else:
             # Overlap by 1 day for safety
             start = (date.fromisoformat(last_end) - timedelta(days=1)).isoformat()
-            logger.info("Pump %s: incremental from %s → %s", serial, start, max_date)
+            logger.info("Pump %s: incremental from %s → %s", mask_serial(serial), start, max_date)
 
         _process_pump(api, device_id, serial, start, max_date, state, config)
 
@@ -82,10 +83,10 @@ def run_day_fetch(date_str: str) -> None:
     serial = str(pump["serialNumber"])
     device_id = pump["tconnectDeviceId"]
 
-    logger.info("Day fetch: pump %s, range %s → %s", serial, start, end)
+    logger.info("Day fetch: pump %s, range %s → %s", mask_serial(serial), start, end)
 
     # Fetch and process without updating fetch state
-    events, _ = fetch_pump_events(api, device_id, start, end, pump_serial=serial)
+    events = fetch_pump_events(api, device_id, start, end, pump_serial=serial).events
 
     if not events:
         logger.info("No events returned for %s", date_str)
@@ -110,12 +111,13 @@ def _process_pump(
     config: dict | None = None,
 ) -> None:
     """Fetch events for one pump, build all DataFrames, and save."""
-    events, last_successful_end = fetch_pump_events(
+    fetched = fetch_pump_events(
         api, device_id, start, end, pump_serial=serial,
     )
+    events, last_successful_end = fetched.events, fetched.last_successful_end
 
     if not events:
-        logger.info("Pump %s: no events returned", serial)
+        logger.info("Pump %s: no events returned", mask_serial(serial))
         return
 
     # Build all DataFrames (enriched if config is provided)
@@ -147,4 +149,4 @@ def _process_pump(
         state[serial]["actual_min_date"] = str(min(all_timestamps))[:10]
         state[serial]["actual_max_date"] = str(max(all_timestamps))[:10]
 
-    logger.info("Pump %s: processing complete", serial)
+    logger.info("Pump %s: processing complete", mask_serial(serial))

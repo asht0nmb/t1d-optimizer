@@ -39,8 +39,16 @@ jobs:
           TCONNECT_PASSWORD: ${{ secrets.TCONNECT_PASSWORD }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           TIMEZONE_NAME: ${{ secrets.TIMEZONE_NAME }}
+          # Used only by the script's specific data-staleness alerts (stale
+          # pump upload / pump CGM gap). Exit code policy: those alerts exit 0
+          # when delivered; any real failure (incl. a failed fetch chunk)
+          # exits 1 and trips the generic failure step below.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CACHE_CREDENTIALS: "false"
           PYTHONUNBUFFERED: "1"
+        # No -v / DEBUG: Actions logs are public and tconnectsync logs device
+        # ids at DEBUG. Logging is also redacted in-process (ingestion.redaction).
         run: uv run python scripts/sync_tandem_to_supabase.py
 
       # The dashboards silently go stale when this job fails — page the

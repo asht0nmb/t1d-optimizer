@@ -12,7 +12,7 @@ contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,7 @@ __all__ = [
     "MealRiseConfig",
     "MealRiseCalibrationConfig",
     "SiteChangeDetectionConfig",
+    "SyncHealthConfig",
     "get_config",
     "load_config",
 ]
@@ -112,6 +113,27 @@ class MealRiseCalibrationConfig:
     correction_lookahead_minutes: int
 
 
+_DEFAULT_MAX_PUMP_UPLOAD_AGE_HOURS = 24.0
+_DEFAULT_MAX_PUMP_CGM_GAP_HOURS = 6.0
+
+
+@dataclass(frozen=True)
+class SyncHealthConfig:
+    """Thresholds (hours, all > 0) for the nightly sync's data-staleness alerts.
+
+    Optional ``sync_health`` block in user_config.yaml; defaults apply when
+    the block (or a key) is absent so older configs keep working.
+    """
+
+    max_pump_upload_age_hours: float = _DEFAULT_MAX_PUMP_UPLOAD_AGE_HOURS
+    max_pump_cgm_gap_hours: float = _DEFAULT_MAX_PUMP_CGM_GAP_HOURS
+
+    @classmethod
+    def from_raw(cls, raw: dict | None) -> "SyncHealthConfig":
+        """Build from the raw config dict (``AppConfig.raw``); tolerant of absence."""
+        return _parse_sync_health((raw or {}).get("sync_health"))
+
+
 @dataclass(frozen=True)
 class AppConfig:
     bg_targets: BgTargets
@@ -123,6 +145,8 @@ class AppConfig:
     meal_rise_calibration: MealRiseCalibrationConfig
     timezone: str
     raw: dict
+    # Optional block; trailing defaulted field so existing constructors keep working.
+    sync_health: SyncHealthConfig = field(default_factory=SyncHealthConfig)
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -152,6 +176,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     meal_rise_calibration = _parse_meal_rise_calibration(
         raw.get("meal_rise_calibration", {})
     )
+    sync_health = _parse_sync_health(raw.get("sync_health"))
     timezone = _parse_timezone(raw["ingestion"])
 
     return AppConfig(
@@ -164,6 +189,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         meal_rise_calibration=meal_rise_calibration,
         timezone=timezone,
         raw=raw,
+        sync_health=sync_health,
     )
 
 
@@ -180,6 +206,27 @@ def get_config() -> AppConfig:
 # ---------------------------------------------------------------------------
 # Per-block parsers / validators
 # ---------------------------------------------------------------------------
+
+def _parse_sync_health(block: dict[str, Any] | None) -> SyncHealthConfig:
+    block = block or {}
+
+    def positive(key: str, default: float) -> float:
+        if key not in block:
+            return default
+        value = block[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"sync_health.{key}: expected a positive number, got {value!r}")
+        return float(value)
+
+    return SyncHealthConfig(
+        max_pump_upload_age_hours=positive(
+            "max_pump_upload_age_hours", _DEFAULT_MAX_PUMP_UPLOAD_AGE_HOURS
+        ),
+        max_pump_cgm_gap_hours=positive(
+            "max_pump_cgm_gap_hours", _DEFAULT_MAX_PUMP_CGM_GAP_HOURS
+        ),
+    )
+
 
 def _parse_bg_targets(block: dict[str, Any]) -> BgTargets:
     low = int(block["low"])
