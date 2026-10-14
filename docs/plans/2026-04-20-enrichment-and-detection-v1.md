@@ -1481,17 +1481,17 @@ Leave the groundwork clean: keep detection functions pure and DataFrame-in/out s
 After all tasks commit:
 
 1. **Regression check.** `uv run pytest -v`. Expected: all prior tests plus the new enrichment + detection tests pass. Target: ≥100 tests green.
-2. **End-to-end smoke.** On a verified day (2026-03-19):
+2. **End-to-end smoke.** On a verified day (<verified-date>):
    ```bash
-   uv run python main.py fetch-day --date 2026-03-19
-   uv run python main.py analyze-anomalies --date 2026-03-19
-   uv run python main.py analyze-meals --date 2026-03-19
+   uv run python main.py fetch-day --date <verified-date>
+   uv run python main.py analyze-anomalies --date <verified-date>
+   uv run python main.py analyze-meals --date <verified-date>
    ```
-   Eyeball the outputs. Known ground truth for 2026-03-19 from sanity_check + viz: pump died 08:06, occlusion at 22:36, lots of high-BG excursions. Anomaly detection should find multiple spikes (including the post-shutdown rise), the 22:36 drop if one occurred, and probably a flatline during the dead-pump window (CGM was out-of-range — **verify** that `is_backfilled_context=True` on those rows, since after the Task 1.4 fix those timestamps fall inside a `cgm_gaps` episode).
+   Eyeball the outputs. Known ground truth for the verified day from sanity_check + viz: a pump battery death, a later occlusion, lots of high-BG excursions. Anomaly detection should find multiple spikes (including the post-shutdown rise), the post-occlusion drop if one occurred, and probably a flatline during the dead-pump window (CGM was out-of-range — **verify** that `is_backfilled_context=True` on those rows, since after the Task 1.4 fix those timestamps fall inside a `cgm_gaps` episode).
 3. **Performance target.** Time the full detection pass on a single day:
    ```bash
-   time uv run python main.py analyze-anomalies --date 2026-03-19
-   time uv run python main.py analyze-meals --date 2026-03-19
+   time uv run python main.py analyze-anomalies --date <verified-date>
+   time uv run python main.py analyze-meals --date <verified-date>
    ```
    Both must return in **< 1 second** on a typical day (≤ 300 CGM readings, ≤ 20 boluses). If slower, profile and optimize hot loops (likely candidates: the flatline rolling window, meal bolus-lookback linear scan).
 4. **Clustering on the full history.** After doing a full fetch (`uv run python main.py fetch`), run `cluster-days --retrain`. Expected: ≥ ~30 days in output with cluster IDs assigned and a sensible distribution (no cluster containing only 1 day unless it's genuinely pathological).

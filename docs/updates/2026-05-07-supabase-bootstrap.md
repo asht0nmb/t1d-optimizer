@@ -18,18 +18,18 @@ Snapshot of the parquets in `data/processed/` at the time of bootstrap (pipeline
 
 | Table | Rows | Span (per primary timestamp) | Notes |
 |---|---:|---|---|
-| `cgm` | 300,324 | 2021-11-12 → 2026-04-14 | 5-min cadence; 51,770 backfilled; 387 timestamp-collisions resolved by `seqnum` PK |
-| `bolus` | 11,115 | 2021-11-12 → 2026-04-14 | |
-| `requests` | 11,114 | 2021-11-12 → 2026-04-14 | 1 historical orphan vs `bolus` (no FK declared) |
-| `basal` | 341,885 | 2021-01-10 → 2026-04-14 | Largest table; 5-min cadence |
-| `suspension` | 1,738 | 2021-11-13 → 2026-04-13 | 2 open suspends (NULL `resume_timestamp`) |
-| `events` | 16,245 | 2021-01-01 → 2026-04-14 | 630 timestamp-collisions (cartridge + tubing same second); resolved by `seqnum` PK |
-| `alarms` | 41,121 | 2021-01-01 → 2026-04-14 | 6,082 timestamp-collisions; 51 distinct `alarm_name` values incl. dynamic `unknown_<n>` |
-| `site_issues` | 42 | 2021-11-19 → 2026-03-26 | Derived from clustered `OcclusionAlarm` |
-| `cgm_gaps` | 2,078 | 2024-01-13 → 2026-04-14 | Derived from `cgm_out_of_range`; all currently `ongoing=False` |
+| `cgm` | 300,324 | 2021 → 2026 | 5-min cadence; 51,770 backfilled; 387 timestamp-collisions resolved by `seqnum` PK |
+| `bolus` | 11,115 | 2021 → 2026 | |
+| `requests` | 11,114 | 2021 → 2026 | 1 historical orphan vs `bolus` (no FK declared) |
+| `basal` | 341,885 | 2021 → 2026 | Largest table; 5-min cadence |
+| `suspension` | 1,738 | 2021 → 2026 | 2 open suspends (NULL `resume_timestamp`) |
+| `events` | 16,245 | 2021 → 2026 | 630 timestamp-collisions (cartridge + tubing same second); resolved by `seqnum` PK |
+| `alarms` | 41,121 | 2021 → 2026 | 6,082 timestamp-collisions; 51 distinct `alarm_name` values incl. dynamic `unknown_<n>` |
+| `site_issues` | 42 | 2021 → 2026 | Derived from clustered `OcclusionAlarm` |
+| `cgm_gaps` | 2,078 | 2024 → 2026 | Derived from `cgm_out_of_range`; all currently `ongoing=False` |
 | **Total** | **725,662** | | |
 
-Six pump serials are present (`…4750`, `…4922`, `…3745`, `…9083`, `…7084`, `…3861`). The active pump is `…3861` (Jan 2025 → present). All composite PKs are `(pump_serial, <natural_id>)`.
+Multiple pump serials are present (one active, the rest retired; serials omitted). The active pump has data from 2025 → present. All composite PKs are `(pump_serial, <natural_id>)`.
 
 ### Vocabularies (became Postgres `ENUM`s)
 
@@ -51,7 +51,7 @@ Per spec ("don't silently coerce"), the bootstrap preserves the parquets verbati
 
 | Table | Observation | Action |
 |---|---|---|
-| `cgm` | 1,217 rows (0.4%) have `bg_mgdl == 0`; 1,776 (0.6%) have `bg_mgdl < 40`. Live G7 hard floor is ~40, so these are sensor sentinels. | Inserted as-is; no CHECK. |
+| `cgm` | A small fraction (<1%) of rows have `bg_mgdl == 0` or `bg_mgdl < 40`. Live G7 hard floor is ~40, so these are sensor sentinels. | Inserted as-is; no CHECK. |
 | `requests` | 2,392/11,114 rows (21.5%) have `bg_mgdl == 0` — manual fingerstick missing values, documented in DATA_NOTES. | Inserted as-is. |
 | `bolus` | 3 rows have `insulin_units == 25.000001907348633` (float32→float64 promotion artifact). | Stored as `numeric(6,3)`; rounds cleanly to `25.000`. |
 | `alarms` | `cgm_fall_rate` activations carry `param1 ≈ 4.29e9` (uint32 sentinel for "no value"). | Stored as `bigint`; consumer interprets sentinel. |
@@ -142,17 +142,16 @@ Every row was conflict-skipped on the second run. No duplicates created.
 
 ### Per-table date-range match
 
-Every primary timestamp's `min` and `max` agree to the second across the round-trip. Postgres echoes timestamps in UTC (e.g. `2026-04-14 20:31:19-07:00` becomes `2026-04-15 03:31:19+00:00`) — this is `timestamptz` storage doing exactly what it's supposed to: same instant, equivalent representation. Python `datetime` equality (instant comparison) returns `True` across both representations.
+Every primary timestamp's `min` and `max` agree to the second across the round-trip. Postgres echoes timestamps in UTC (e.g. a `-07:00` local timestamp is echoed as the same instant in `+00:00`) — this is `timestamptz` storage doing exactly what it's supposed to: same instant, equivalent representation. Python `datetime` equality (instant comparison) returns `True` across both representations.
 
-### Spot check — last 7 days of pump `…3861`
+### Spot check — last 7 days of the active pump
 
-Anchor: max `cgm.timestamp` for the live pump = `2026-04-14 20:31:19-07:00`.
-Window: `[2026-04-07 20:31:19-07:00 → 2026-04-14 20:31:19-07:00]`.
+Anchor: max `cgm.timestamp` for the live pump. Window: the 7 days ending at that anchor.
 
 | Metric | Parquet | Postgres | Match |
 |---|---:|---:|:---:|
 | `cgm` row count | 1,767 | 1,767 | OK |
-| `cgm` mean `bg_mgdl` | 155.81 | 155.81 | OK |
+| `cgm` mean `bg_mgdl` | match | match | OK |
 | `bolus` row count | 58 | 58 | OK |
 
 ### New-tables sanity
@@ -177,7 +176,7 @@ This is a documented Postgres semantic: when the unique index is *partial*, `ON 
 
 ```sql
 INSERT INTO alerts_sent (alert_kind, event_ref, payload)
-VALUES ('anomaly_spike', 'cgm:…3861:243687', '{"bg": 295}'::jsonb)
+VALUES ('anomaly_spike', 'cgm:<pump-serial>:<seqnum>', '{"bg": <int>}'::jsonb)
 ON CONFLICT (alert_kind, event_ref) WHERE event_ref IS NOT NULL DO NOTHING;
 ```
 
