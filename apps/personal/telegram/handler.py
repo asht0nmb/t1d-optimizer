@@ -17,6 +17,12 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from apps.personal.cron.live_health import (
+    LIVE_CRON_SOURCE,
+    LiveHealthConfig,
+    LiveSummary,
+    summarize_live_state,
+)
 from apps.personal.telegram.commands import ParsedCommand, parse_update
 from apps.personal.telegram.digest import (
     build_day_digest,
@@ -134,7 +140,26 @@ def _trends_reply(
     return build_trends_digest(tir_by_window)
 
 
-def _status_reply(*, storage: Storage, now: datetime) -> str:
+def _live_summary(
+    storage: Storage, config: AppConfig, now: datetime
+) -> LiveSummary:
+    """Read the live_cron heartbeat; never raises (missing row -> empty)."""
+    try:
+        state = storage.get_fetch_state(LIVE_CRON_SOURCE)
+        summary = summarize_live_state(
+            state,
+            now,
+            config.timezone,
+            LiveHealthConfig.from_app_config(config),
+            reading_stale_minutes=config.meal_rise.max_reading_age_minutes,
+        )
+    except Exception:
+        logger.warning("telegram: live_cron state unreadable for /status", exc_info=True)
+        return LiveSummary.empty()
+    return summary or LiveSummary.empty()
+
+
+def _status_reply(*, storage: Storage, config: AppConfig, now: datetime) -> str:
     try:
         cgm = storage.read_all_table("cgm")
         latest_cgm = (
@@ -168,6 +193,7 @@ def _status_reply(*, storage: Storage, now: datetime) -> str:
         latest_alert_ts=latest_alert.sent_at if latest_alert else None,
         latest_alert_delivery=latest_alert.delivery if latest_alert else None,
         now=now,
+        live=_live_summary(storage, config, now),
     )
 
 
@@ -191,7 +217,7 @@ def build_reply(
     if parsed.command == "trends":
         return _trends_reply(storage=storage, config=config, tz=tz, now=now)
     if parsed.command == "status":
-        return _status_reply(storage=storage, now=now)
+        return _status_reply(storage=storage, config=config, now=now)
     return help_text()
 
 

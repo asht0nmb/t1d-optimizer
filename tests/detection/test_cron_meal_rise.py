@@ -525,8 +525,10 @@ def test_cron_writes_live_heartbeat(patch_cron_io, monkeypatch, memory_storage, 
 
 
 def test_cron_failure_skips_heartbeat_and_alerts(patch_cron_io, monkeypatch, memory_storage, mock_env):
-    """When the cycle raises, NO heartbeat is written (its absence is the
-    liveness signal) and a worker-failure Telegram alert is sent."""
+    """When the cycle raises, the heartbeat does NOT advance last_synced_at
+    (it only advances on a cycle that evaluated fresh CGM) but the failure is
+    recorded as ``last_outcome == "error"``, and a worker-failure Telegram
+    alert is sent."""
     def _boom(*a, **k):
         raise RuntimeError("dexcom exploded")
 
@@ -536,8 +538,11 @@ def test_cron_failure_skips_heartbeat_and_alerts(patch_cron_io, monkeypatch, mem
     exit_code = run_cron(now=now)
     assert exit_code == 1
 
-    # No success heartbeat.
-    assert memory_storage.get_fetch_state("live_cron") is None
+    # last_synced_at was not advanced; the error outcome is recorded.
+    hb = memory_storage.get_fetch_state("live_cron")
+    assert hb is not None
+    assert hb.last_fetched_at is None
+    assert hb.payload["last_outcome"] == "error"
     # A failure alert was sent via the telegram sender.
     assert patch_cron_io.called
     sent_text = " ".join(str(c.args) for c in patch_cron_io.call_args_list)
