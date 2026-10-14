@@ -95,8 +95,9 @@ _MAX_TYPE_LEN = 200
 # newline-less stream cannot grow memory without bound.
 MAX_LINE_BYTES = 64 * 1024
 # Allowlisted lines longer than this are dropped rather than redacted:
-# redaction cost grows super-linearly with line length (_EMAIL_RE), and
-# truncating could cut an identifier in half and defeat its pattern.
+# truncating could cut an identifier in half and defeat its pattern, and our
+# own loggers never legitimately emit lines this long. (Redaction itself is
+# linear-time since #27; this cap is defence in depth, not a perf workaround.)
 MAX_PASS_CHARS = 8 * 1024
 
 # Env values the gate opportunistically scrubs if present. Not required.
