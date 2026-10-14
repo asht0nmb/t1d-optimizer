@@ -8,7 +8,7 @@ Scope: `apps/web/**`, the Node version line of the `web` job in `.github/workflo
 
 ## Target choice
 
-Next 16.4.0 (npm `latest`). Next 15.5.x is still receiving backports, but 15 is the previous major and would force a second migration soon after; the code base is small (12 API routes, ~12 pages) and its auth surface is thin, so going straight to the current major costs little more. No concrete blocker found: Node requirement is `>=20.9`, React 19, TypeScript 5.1+ (repo uses 5.9).
+Next 16.4.0 (npm `latest`). Per the Next.js support policy (nextjs.org/support-policy): 16.x is **Active LTS** (new features, bug fixes and security patches); 15.x is **Maintenance LTS** ("only critical bug fixes and essential security updates", about two years from its Oct 2024 release, so it is near the end of that window); 14.x is **Unsupported** (patched only in rare circumstances), which is why 14.2.35 is the last 14.x release. 15 would force a second migration soon, and 16 is the only line with full security coverage. The code base is small (12 API routes, ~12 pages) with a thin auth surface, so going straight to 16 costs little more than 15. No concrete blocker found: Node requirement is `>=20.9`, React 19, TypeScript 5.1+ (repo uses 5.9).
 
 ## Versions
 
@@ -45,7 +45,7 @@ Advisories resolved (all published, GHSA IDs):
 2. `next lint` removed in 16: `lint` script is now `eslint .`; `.eslintrc.json` replaced by flat `eslint.config.mjs` (`eslint-config-next/core-web-vitals` + `/typescript`). Lint now also covers `__tests__/` (next lint did not). The new `react-hooks/set-state-in-effect` rule (react-hooks v7) is turned off with a comment: it flagged 11 existing fetch-in-effect / theme-hydration spots; it is React-Compiler guidance, not a correctness issue, and refactoring is out of scope.
 3. `experimental.serverComponentsExternalPackages` -> top-level `serverExternalPackages` (still `["pg"]`).
 4. Async request APIs: only `app/api/day/[date]/route.ts` used `params`; now `params: Promise<{ date: string }>` and awaited. No page uses `cookies()`/`headers()` synchronously (`lib/supabase/server.ts` already awaited `cookies()`); client pages use `useParams`/`useSearchParams`, unaffected.
-5. `@supabase/ssr` 0.12: the `getAll`/`setAll` cookie adapter used by `lib/supabase/server.ts` and `lib/supabase/middleware.ts` is already the supported API; no code change was required, and `getUser()` (server-validated) remains the auth check.
+5. `@supabase/ssr` 0.12 (changelog read; 0.10.3 -> 0.11.0 -> 0.12.x): the `getAll`/`setAll` cookie adapter used by `lib/supabase/server.ts` and `lib/supabase/middleware.ts` is the supported API and type-checks unchanged; `getUser()` (server-validated) remains the auth check. **Follow-up (deliberately not adopted here to keep auth responses byte-identical):** `setAll` now receives a second `headers` argument carrying `Cache-Control` values that should be copied onto any response that sets auth cookies, so a CDN never caches a token-refresh `Set-Cookie`. The reference pattern is `setAll(cookiesToSet, headers) { ...; Object.entries(headers).forEach(([k, v]) => supabaseResponse.headers.set(k, v)) }` in `lib/supabase/middleware.ts`. Recommended as a small separate hardening PR.
 6. `tsconfig.json` was auto-rewritten by `next build` (`jsx: react-jsx`, `target: ES2017`, `.next/dev/types` include). Turbopack is now the default bundler.
 7. Test rename: `middleware-matcher.test.ts` -> `proxy-matcher.test.ts`.
 
@@ -60,7 +60,7 @@ No change to `lib/api/auth.ts` logic, `requireSession`, `verifyCronAuth`, the ma
 
 ## Gates (from `apps/web`)
 
-`npm ci`, `npm run lint` (0 errors; 1 pre-existing `window.location.href` warning in `AppNav.tsx`), `npx tsc --noEmit`, `npm test` (128 passed, was 108), `next build` with CI placeholder env (27 prerendered/route entries listed; the previous "28" counted differently under Next 14).
+`npm ci`, `npm run lint` (0 errors; 1 pre-existing `window.location.href` warning in `AppNav.tsx`), `npx tsc --noEmit`, `npm test` (128 passed, was 108), `next build` with CI placeholder env ("Generating static pages 27/27"; Next 14 reported 28). Route-table check: 13 page entries (incl. `/_not-found`) are prerendered; the 12 API routes, `/auth/callback` and the `/day/[date]` page are dynamic, and `/favicon.ico` is still emitted and served (200) from the build output, so no route was lost; the counter difference is a build-reporting change, not a missing page.
 
 ## Deploy notes
 
