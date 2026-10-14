@@ -50,21 +50,41 @@ _MIN_SECRET_LEN = 5  # shorter values would shred unrelated text
 _UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+")
+# Linear-time email matching. The naive ``[local]+@domain`` is O(n^2) on a long
+# run of local-part characters with no ``@``: the engine restarts at every
+# position in the run and each attempt rescans to the run's end (~2.3 s per
+# 64 KB). Instead, consume the whole local-part run once (possessive) and make
+# the ``@domain`` tail optional; ``_redact_emails`` keeps the run unchanged when
+# the tail is absent. This is exactly equivalent to the old pattern: the
+# leftmost possible match start in a run is always the run start, and if that
+# start fails every later start in the run fails the same way. Domain labels
+# cannot contain ``.``, so possessive labels never give up a needed character.
+# No length bounds: a bound would fail *open* (leave part of an over-long
+# address visible), and this layer must fail closed.
+_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]++(@[A-Za-z0-9\-]++(?:\.[A-Za-z0-9\-]++)++)?"
+)
 _PUMPER_PARAM_RE = re.compile(r"(?i)(pumperId=)[^&\s'\"]+")
 _PUMP_LOGS_RE = re.compile(r"(pump-logs/)[^/?\s'\"]+")
-_BOT_TOKEN_RE = re.compile(r"bot\d{6,}:[A-Za-z0-9_\-]{20,}")
+_BOT_TOKEN_RE = re.compile(r"bot\d{6,}+:[A-Za-z0-9_\-]{20,}+")
 
 # tconnectsync logs ``Decoded JWT: {json}`` at INFO on every login. The claims
 # hold the patient's name, email and account ids. Redact the whole payload.
 _DECODED_JWT_RE = re.compile(r"(Decoded JWT:)[^\n]*")
-_JWT_TOKEN_RE = re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*")
+# Same consume-then-decide shape as ``_EMAIL_RE``: ``eyJeyJeyJ...`` with no dots
+# was O(n^2). The header run is taken possessively and the ``.payload.sig``
+# tail is optional; ``_redact_jwts`` leaves header-only matches unchanged. A
+# later ``eyJ`` in the same header run would need the same tail, so skipping it
+# is exact. No length bounds: real JWT payloads are routinely >1 KB.
+_JWT_TOKEN_RE = re.compile(
+    r"eyJ[A-Za-z0-9_\-]++(\.[A-Za-z0-9_\-]++\.[A-Za-z0-9_\-]*+)?"
+)
 _CLAIM_KEYS = (
     "given_name", "family_name", "name", "email", "preferred_username",
     "sub", "sid", "accountId", "pumperId",
 )
 _CLAIM_RE = re.compile(
-    r'(["\'](?:' + "|".join(_CLAIM_KEYS) + r')["\']\s*:\s*)(["\'])[^"\']*\2'
+    r'(["\'](?:' + "|".join(_CLAIM_KEYS) + r')["\']\s*+:\s*+)(["\'])[^"\']*+\2'
 )
 
 _MIN_NAME_LEN = 3  # names are matched as whole words, case-insensitively
@@ -138,6 +158,14 @@ def _name_pattern() -> re.Pattern[str] | None:
     return _name_re
 
 
+def _redact_emails(text: str) -> str:
+    return _EMAIL_RE.sub(lambda m: _EMAIL_TOKEN if m.group(1) else m.group(0), text)
+
+
+def _redact_jwts(text: str) -> str:
+    return _JWT_TOKEN_RE.sub(lambda m: "<jwt>" if m.group(1) else m.group(0), text)
+
+
 def clear_secrets() -> None:
     global _name_re
     _secrets.clear()
@@ -150,7 +178,7 @@ def redact(text: str) -> str:
     if not text:
         return text
     text = _DECODED_JWT_RE.sub(r"\1 " + _SECRET_TOKEN, text)
-    text = _JWT_TOKEN_RE.sub("<jwt>", text)
+    text = _redact_jwts(text)
     text = _CLAIM_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_SECRET_TOKEN}{m.group(2)}", text)
     for value in sorted(_secrets, key=len, reverse=True):
         if value in text:
@@ -162,7 +190,7 @@ def redact(text: str) -> str:
     text = _PUMP_LOGS_RE.sub(r"\1" + _ID_TOKEN, text)
     text = _BOT_TOKEN_RE.sub("bot" + _SECRET_TOKEN, text)
     text = _UUID_RE.sub(_ID_TOKEN, text)
-    text = _EMAIL_RE.sub(_EMAIL_TOKEN, text)
+    text = _redact_emails(text)
     return text
 
 
