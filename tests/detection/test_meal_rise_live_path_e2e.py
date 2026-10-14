@@ -257,7 +257,9 @@ def test_proposed_fix_recovers_true_instant_for_any_offset():
 # --------------------------------------------------------------------------- #
 
 def _no_alert(live, storage):
-    assert live.posts == []
+    # PR #15 added a separate stale-CGM Telegram alert; only the meal-rise
+    # alert must be absent here.
+    assert [p for p in live.posts if "Fast glucose rise" in p[1]["text"]] == []
     assert storage.list_detection_results(kind="meal_rise") == []
     assert storage.recent_alerts("meal_rise", timedelta(days=1)) == []
 

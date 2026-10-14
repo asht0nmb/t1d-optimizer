@@ -43,7 +43,7 @@ Entry: cron-job.org every 5 min -> Vercel worker `api/index.py` (bearer `CRON_SE
 | 14 | Atomic claim | `record_alert` L355-368 | `ON CONFLICT (alert_kind, event_ref)`; lost race => suppressed |
 | 15 | Send | L370 -> `send_telegram_message` L181-197 | `requests.post`, `parse_mode=HTML` |
 | 16 | Persist | `record_detection_result` L380-387 | `telegram_sent` true/false recorded either way |
-| 17 | Heartbeat | `finally` L520-528 | written on every non-raising cycle, **including** freshness skips, `failed_config`, and empty feeds. So a healthy `live_cron` heartbeat does not mean alerts can fire |
+| 17 | Heartbeat (as on `main`; PR #15 makes it truthful) | `finally` L520-528 | written on every non-raising cycle, **including** freshness skips, `failed_config`, and empty feeds. So a healthy `live_cron` heartbeat does not mean alerts can fire |
 
 Note the detector never consults boluses. "Missed meal" is inferred only from a fast sustained rise; the alert text just flags "in case a meal went unbolused".
 
@@ -63,7 +63,7 @@ Scenario: unbolused lunch rise, 120 -> 185 mg/dL over 30 min (about 2.17 mg/dL/m
 **Results**
 
 * With `DT` offset `+0000`: **fires**. One Telegram POST to the right URL/chat id, one `detection_results` row (`telegram_sent: true`), one `alerts_sent` claim, heartbeat written, local hour 12, multiplier 0.7. So gates 3-17 work end to end.
-* With `DT` offset `-0400`, `-0700`, `-0800`: **does not fire** (0 posts, 0 rows). This was originally pinned as `xfail(strict=True)`; with the fix from PR #15 in this branch's base the markers are removed and these cases are ordinary passing tests (they fail on `main`). Cause: section 5.
+* With `DT` offset `-0400`, `-0700`, `-0800`: on `main` it **did not fire** (0 posts, 0 rows). In the first revision of this PR those cases were pinned as `xfail(strict=True)`; with the PR #15 fix in this branch's base the markers are removed and they pass as ordinary tests. Cause: section 5.
 * Gate pins via the real path (offset `+0000` so the bug cannot interfere): same ramp at 03:00 local does **not** fire (2.17 < 2.34), a 1.3x steeper one does; freshness boundary (14 min fires, 16 and 240 do not); coverage (5 of 7 fires, 4 of 7 blocked); start-level bounds (250 fires, 251 and 69 do not); refractory (second qualifying cycle sends nothing); Telegram outage still claims + records; **missing Telegram env => `run_cron` returns 1, both tables stay empty, heartbeat still written** (the second silent-zero path).
 
 **Do existing tests cover this?** Partly. `tests/detection/test_cron_meal_rise.py::test_cron_sharp_rise_breakfast_triggers_alert` runs `run_cron` with an in-memory store and a patched sender, so the downstream half is covered. But its `MockGlucoseReading` carries a hand-built UTC datetime ("pydexcom datetimes are standard naive UTC datetime" in its docstring, which is no longer true for 0.5.1), so it bypasses exactly the step that is broken; it patches `send_telegram_message` rather than the HTTP layer; and it only tests a 100 -> 150 rise inside a meal window. The new file closes those gaps.
@@ -209,18 +209,18 @@ Aligned with the separate per-cycle outcome-logging work (not duplicated here):
 1. **Make every cycle's outcome queryable** (that agent's scope): `alert_sent | suppressed_refractory | no_rise | stale_skip | empty_feed | failed_config | error`. Strongly suggested extra fields on the `stale_skip`/every-cycle record: the computed **age in minutes**, the **raw Share `DT` string (and parsed offset)** of the newest reading, `n_samples`, `coverage`, and for `no_rise` the **slope, threshold, start level, hour**. The raw `DT` would have exposed this bug on the first cycle; slope/threshold make "(c) gates too tight" answerable from data.
 2. **Surface a rolling "fresh-cycle fraction" and "last cycle that reached the detector" on `/status`** and alert (once) when no cycle has reached the detector for N hours. The heartbeat alone proves only that the worker ran.
 3. **Treat `failed_config` as an error, not a quiet return**: it currently returns 1 without any Telegram or DB trace. At minimum log it into the per-cycle outcome record.
-4. **Fix `:163`** (section 5) and drop the `xfail` markers in the same PR. Log the computed age on every cycle (item 1) so a similar timezone mix-up cannot hide; a *negative* age (reading in the future) is an equally clear parse-error signal.
+4. **Fix `:163`**: done in PR #15. Log the computed age on every cycle (item 1) so a similar timezone mix-up cannot hide; a *negative* age (reading in the future) is an equally clear parse-error signal.
 5. **Logic notes for the owner (advisory; nothing changed here):** (i) a 4-hour-plus freshness failure is informational, not a detector failure, so log it differently from a normal "no rise"; (ii) the threshold is a placeholder (see M2); the replay shows 685 alerts over 7.5 months, so threshold or a bolus-aware suppression (e.g. skip when a food bolus landed in the prior 30 min, which the live path does not check at all) are the levers for alert volume. `--sweep`-style analysis is available via `scripts/score_meal_rise.py`.
 6. Once logging lands, rerun this replay alongside the live outcome counts to compare expected vs observed alerts/week directly.
 
 ## 10. Files
 
-* `tests/detection/test_meal_rise_live_path_e2e.py` - end-to-end harness + gate pins + xfail-pinned bug (22 cases: 16 pass, 6 strict xfail).
+* `tests/detection/test_meal_rise_live_path_e2e.py` - end-to-end harness + gate pins + tz-offset regression cases (22 cases, all passing on top of PR #15; the offset cases fail on `main`).
 * `tests/detection/test_replay_meal_rise_live.py` - unit tests for the replay script (7 cases, synthetic data, no DB).
 * `scripts/replay_meal_rise_live.py` - read-only replay.
 * This document.
 
-Full suite after these additions: 772 passed, 42 skipped, 48 deselected, 6 xfailed (baseline was 749 passed).
+Full suite on top of PR #15: 830 passed, 42 skipped, 48 deselected, 0 xfailed.
 
 ## 11. Rerun commands
 
@@ -229,7 +229,7 @@ uv sync --all-groups                      # plotly etc. are needed to collect th
 
 # end-to-end harness (no network, no DB)
 uv run pytest tests/detection/test_meal_rise_live_path_e2e.py -q
-uv run pytest tests/detection/test_meal_rise_live_path_e2e.py -q --runxfail   # shows the bug failing
+uv run pytest tests/detection/test_meal_rise_live_path_e2e.py -q   # offset cases fail on code predating the PR #15 fix
 
 # replay (read-only Supabase session; ~70 s per phase)
 uv run python scripts/replay_meal_rise_live.py \
