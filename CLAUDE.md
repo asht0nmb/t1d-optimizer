@@ -39,7 +39,7 @@ The ingestion + enrichment + detection layers are in place, and three surfaces a
 - `db/migrations/` — Supabase schema migrations and RLS policies.
 - `.github/workflows/` — nightly Tandem sync (Telegram alert on failure), manual meal-rise fallback, smoke test, and pytest CI.
 - `scripts/` — CLI entry points: `sanity_check` (check), `daily_viz` (viz), `doctor`; `score_meal_rise.py` (M2 calibration report — advisory only).
-- `tests/` — 742 passed, 42 skipped, 48 deselected in the default suite across builders, storage, enrichment, detection features/config, the `core/metrics/` clinical-analytics suite (golden + hypothesis property tests), CLI, the storage Protocol contract suite under `tests/core/`, and Telegram command/digest/handler tests under `tests/personal/` (supabase-parameterized tests skip unless `SUPABASE_TEST_URL` is set; integration-marked tests are deselected by default). 47 additional `legacy`-marked tests cover `detection/legacy/*` and run opt-in via `uv run pytest -m legacy`. The web shell has its own vitest suite (93 tests) + `tsc --noEmit` + `next build`, gated in CI alongside pytest.
+- `tests/` — 749 passed, 42 skipped, 48 deselected in the default suite across builders, storage, enrichment, detection features/config, the `core/metrics/` clinical-analytics suite (golden + hypothesis property tests), CLI, the storage Protocol contract suite under `tests/core/`, and Telegram command/digest/handler tests under `tests/personal/` (supabase-parameterized tests skip unless `SUPABASE_TEST_URL` is set; integration-marked tests are deselected by default). 47 additional `legacy`-marked tests cover `detection/legacy/*` and run opt-in via `uv run pytest -m legacy`. The web shell has its own vitest suite (108 tests) + `tsc --noEmit` + `next build`, gated in CI alongside pytest.
 
 ### `core/` package boundary
 
@@ -112,7 +112,7 @@ The first 6 lines are a metadata header (device info, software version, report d
 - `db/migrations/` — Supabase schema and RLS migrations.
 - `.github/workflows/` — nightly Tandem sync, manual meal-rise fallback, smoke test, pytest CI.
 - `scripts/` — CLI entry points (`sanity_check`, `daily_viz`, `doctor`)
-- `tests/` — pytest suite (742 passed / 42 skipped / 48 deselected by default, plus 47 legacy-marked tests opt-in via `-m legacy`); Storage Protocol contract suite and `core/metrics/` analytics tests under `tests/core/`
+- `tests/` — pytest suite (749 passed / 42 skipped / 48 deselected by default, plus 47 legacy-marked tests opt-in via `-m legacy`); Storage Protocol contract suite and `core/metrics/` analytics tests under `tests/core/`
 - `docs/operating_docs/` — `TECHNICAL_SPEC.md`, `DATA_CATALOG.md`, `DATA_NOTES.md`, `DATA_NOTES_2.md`, `DATA_ISSUES.md`, `api_levels.md`, `tconnectsync_api_map.md`
 - `docs/updates/` — dated session write-ups (`YYYY-MM-DD-*.md`); append-only audit log
 - `research.ipynb` — exploratory analysis notebook
@@ -123,5 +123,6 @@ The first 6 lines are a metadata header (device info, software version, report d
 - **Never hardcode thresholds or personal parameters.** All config lives in `config/user_config.yaml` (see `TECHNICAL_SPEC.md` for schema). Detection logic reads from config at runtime.
 - **Real-time detection uses trailing window only** — no future BG context available.
 - **Bump `ingestion.pipeline_version.PIPELINE_VERSION` (and add a changelog entry) whenever a builder or enricher changes output schema or timestamp semantics in a way that invalidates existing `data/processed/*.parquet`.** Run `uv run python main.py doctor` to confirm on-disk data matches the code.
+- **The repo and its GitHub Actions logs are public.** Never log, print, or commit pump serials (mask as `…1234`), Tandem/Dexcom account or device IDs/UUIDs, names, date of birth, emails, tokens, or raw API/metadata dumps. Scan any tool output (e.g. tconnectsync check logs) for PII before committing it — a committed log forced a full git-history rewrite on 2026-10-14, so commit SHAs cited in docs before that date are stale.
 - Python 3.12+ required. Dependencies managed with `uv` (see `pyproject.toml`).
 - ML stack: scikit-learn, xgboost, lightgbm, statsmodels, scipy.
