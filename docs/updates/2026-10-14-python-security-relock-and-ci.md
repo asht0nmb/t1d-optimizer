@@ -46,3 +46,8 @@ Breaking-change review: setup-node v5/v6 auto-cache is npm-only and the web job 
 
 ## Verification
 `uv lock --check` clean, `uv sync --all-groups` ok, `uv run pytest -q`: 880 passed, 42 skipped, 48 deselected. pip-audit: 144 -> 0.
+
+## Review notes
+- setuptools is a new floor, not only removal of the `<75` pin: `>=83.0.0` (resolved 84.0.0), chosen to fix PYSEC-2025-49 and PYSEC-2026-3447.
+- `jupyter-builder` 1.2.3 is a new transitive, dev-only dependency of jupyterlab 4.6. It is not in the worker requirements files.
+- The new action majors' input schemas were checked only via release notes and a green CI run. A green CI run on this PR, or after rebasing onto main once #19 merges, is the real verification.
