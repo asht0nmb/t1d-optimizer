@@ -12,7 +12,7 @@ This document is written to double as learning material, not just a changelog �
 
 The owner's hard constraint: MIT sources (openaps/oref0, nightscout/trio-oref) can be read *and* ported/adapted with attribution. AGPL-3.0 sources (nightscout/cgm-remote-monitor, the AndroidAPS tree and every fork including autoISF and Tai) can be read for method and reimplemented from documented behavior, but never copied or adapted from.
 
-**What was fetched and read this phase:** `nightscout/trio-oref`, `dev` branch, commit `8282ce71a57d09a160e92ecd2baf28a70c89694d` (fetched via the GitHub API 2026-08-16). Files read in full: `lib/determine-basal/determine-basal.js`, `lib/determine-basal/cob.js`, `lib/glucose-get-last.js`, `lib/iob/calculate.js`, `lib/meal/total.js`, `lib/autotune-prep/categorize.js`, `lib/autotune-prep/index.js`. All MIT-licensed, confirmed via the GitHub API (`license.spdx_id == "MIT"`) and the file-level license header reproduced in each source file. Also read: the `nightscout/trio-algorithm-validator` README (MIT) for Workstream E.
+**What was fetched and read this phase:** `nightscout/trio-oref`, `dev` branch, commit `8282ce71a57d09a160e92ecd2baf28a70c89694d` (fetched via the GitHub API 2026-08-16). Files read in full: `lib/determine-basal/determine-basal.js`, `lib/determine-basal/cob.js`, `lib/glucose-get-last.js`, `lib/iob/calculate.js`, `lib/meal/total.js`, `lib/autotune-prep/categorize.js`, `lib/autotune-prep/index.js`. All MIT-licensed, confirmed via the GitHub API (`license.spdx_id == "MIT"`); `calculate.js` carries no file-level header, so the repo-level MIT notice is reproduced in `third_party/trio-oref/LICENSE.txt`. Also read: the `nightscout/trio-algorithm-validator` README (MIT) for Workstream E.
 
 **What was NOT read:** no AGPL source was fetched or read this phase. `notes/algorithm-research.md`'s own description of autoISF's four factors and its dynamic-ISF formula (Workstream D) was treated as the source, plus general public documentation — not the AndroidAPS/autoISF/Tai source trees themselves. `nightscout/cgm-remote-monitor` was not touched. This sentence is the deliverable for that constraint: the AGPL boundary was not crossed.
 
@@ -108,7 +108,7 @@ Unrelated to Workstream A specifically, but worth restating since it's binding: 
 
 ### Tests
 
-`tests/detection/test_iob.py` (18 tests) and `tests/detection/test_deviation.py` (14 tests): curve boundary conditions (t=0, t=end), dose conservation (numeric integration of the activity curve recovers ~1.0 unit), monotonic IOB decay, causal (non-lookahead) baseline computation, suspension segment-splitting, the warm-up NaN property from both directions (short history → NaN, long history → populated), backfill-spacing normalization, and an end-to-end qualitative sanity check (a large bolus with flat observed BG must produce `bgi < 0` and `deviation_5m > 0`, confirming the two sign conventions compose correctly). All 32 pass; full-suite run is 794 passed / 42 skipped / 48 deselected, 0 failures (see §8).
+`tests/detection/test_iob.py` (19 tests) and `tests/detection/test_deviation.py` (13 tests): curve boundary conditions (t=0, t=end), dose conservation (numeric integration of the activity curve recovers ~1.0 unit), monotonic IOB decay, causal (non-lookahead) baseline computation, suspension segment-splitting, the warm-up NaN property from both directions (short history → NaN, long history → populated), backfill-spacing normalization, and an end-to-end qualitative sanity check (a large bolus with flat observed BG must produce `bgi < 0` and `deviation_5m > 0`, confirming the two sign conventions compose correctly). All 32 pass; full-suite run (before the config-parameter change) was 794 passed / 42 skipped / 48 deselected, 0 failures (see §8).
 
 ---
 
@@ -122,7 +122,7 @@ Read `determine-basal.js`'s UAM path in full before writing anything. Two things
 
 `detection/episode_boundary.py::track_deviation_trajectory` ports the tracking loop (not the downstream combination — that combination feeds a dosing prediction, out of scope) as a standalone function: given a `deviation_5m` series, it returns the running extremes and their slopes. A rising max with ~0 slope reads as "still building"; a max with strongly negative slope reads as "past peak, winding down"; a trajectory pinned near its min reads as "flat baseline, no episode." This is a genuine candidate primitive for a future episode-boundary definition (where a detected meal-rise "ends," for scoring or for a duration feature) — but **it is not wired into M1 or anything else**. The notes' instruction was to read this before touching M1 again, not to touch it this phase; that's a deliberate design decision for the owner to make with this prototype in hand, informed by real deviation data this module hasn't seen yet (again, no DB access this phase).
 
-14 tests in `tests/detection/test_episode_boundary.py`, covering: rising-then-decaying episode shape, hand-computed slope values, the non-positive/non-negative sign invariants, NaN-row pass-through (a missing reading doesn't reset the trajectory), and flat-baseline zero slopes.
+8 tests in `tests/detection/test_episode_boundary.py`, covering: rising-then-decaying episode shape, hand-computed slope values, the non-positive/non-negative sign invariants, NaN-row pass-through (a missing reading doesn't reset the trajectory), and flat-baseline zero slopes.
 
 ---
 
@@ -197,7 +197,7 @@ The owner was explicit that the five workstreams are a starting order, not exhau
 - `detection/deviation.py` — BGI/deviation (Workstream A)
 - `detection/episode_boundary.py` — deviation-trajectory prototype (Workstream B)
 - `detection/deviation_categorize.py` — categorization against `bolus_category`/`rate_source` (Workstream C)
-- `tests/detection/test_iob.py`, `test_deviation.py`, `test_episode_boundary.py`, `test_deviation_categorize.py` — 56 new tests, all passing; full suite 794 passed / 42 skipped / 48 deselected, 0 failures.
+- `tests/detection/test_iob.py`, `test_deviation.py`, `test_episode_boundary.py`, `test_deviation_categorize.py` — 52 new tests (19 + 13 + 8 + 12), all passing; full suite 794 passed / 42 skipped / 48 deselected, 0 failures at that time (798 passed after the `test_research_config.py` additions below).
 
 **Recommended follow-ups, not done this phase (each independently small):**
 1. Extend `ingestion.builders.build_basal_df` to also capture `profile_basal_rate`, `algorithm_rate`, `temp_rate` off `LidBasalDelivery` (bytes already parsed, just not surfaced). Bump `PIPELINE_VERSION`.
@@ -229,3 +229,5 @@ Review of PR #10 flagged hardcoded personal/physiological parameters (CLAUDE.md:
 The modules still accept `IobCurveConfig` / `CategorizeConfig` objects (signatures unchanged); their dataclass defaults mirror the YAML and a test asserts they stay in sync. `build_dose_events(baseline_lookback_days=None)` now resolves to the config default.
 
 Deliberately left in code: `MIN_VALID_BG = 39` (Dexcom display floor, a device constant), the oref bucket boundaries (2.5/17.5/42.5 min) and the `* 5.0` five-minute normalization (algorithm/sampling constants), and `ISF`, which `DeviationConfig` already requires explicitly with no default.
+
+Adds `tests/detection/test_research_config.py` (4 tests): YAML/default sync, absent-block fallback, and that changing `noise_band_mgdl` / `dia_hours` in config changes behavior.
