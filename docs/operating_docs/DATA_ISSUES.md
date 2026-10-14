@@ -19,7 +19,7 @@ Findings from real-data verification against the Tandem t:connect app.
 
 **Impact:** The stale reading appears on the CGM trace as a false data point (a low value plotted when BG was actually much higher). It also skews daily statistics (mean, TIR, SD).
 
-**Severity:** This is not a rare edge case. A single bad day produced several stale readings — every CGM gap produced at least one. The stale values can be dramatically wrong (errors of 200+ mg/dL). On a bad day with multiple gaps, this significantly corrupts aggregate statistics.
+**Severity:** This is not a rare edge case. A single bad day produced several stale readings — every CGM gap produced at least one. The stale values can be dramatically wrong (errors of 100+ mg/dL). On a bad day with multiple gaps, this significantly corrupts aggregate statistics.
 
 **When this can occur:**
 - Pump battery dies (as in this case — suspension with `reason=alarm`)
@@ -108,27 +108,27 @@ This replaces the generic `suspend_reason=alarm` with actionable information lik
 
 tconnectsync maps alert IDs 0–49 to named enums but IDs 50+ fall through as `DefaultAlertNN`. Cross-referencing all activations against CGM readings reveals their meaning:
 
-**Alert51 (param2=873) = Low BG alert**
-Fires when BG is near or at ~70-80 mg/dL and dropping. Confirmed across a handful of activations:
-- BG at activation: near or below the ~70-80 mg/dL range (one case a stale cached value that overstated BG)
+**Alert51 = Low BG alert** (constant `param2` encoding, not mg/dL)
+Fires when BG is near the owner's low threshold and dropping. Confirmed across a handful of activations:
+- BG at activation: near or below the low threshold (one case a stale cached value that overstated BG)
 - Cleared when BG recovers above threshold
 
-**Alert50 (param2=862) = High BG alert**
-Fires when BG exceeds ~200 mg/dL. Confirmed across ~20 activations:
-- BG at activation: every single one ≥200 mg/dL
+**Alert50 = High BG alert** (constant `param2` encoding, not mg/dL)
+Fires when BG exceeds the owner's high threshold. Confirmed across ~20 activations:
+- BG at activation: every single one at or above the high threshold
 - Very frequent — fires many times across a bad multi-day stretch
 
-**The param2 values (862, 873) are not mg/dL** — they appear to be pump-internal threshold encodings, constant across all activations of the same alert type.
+**The Alert50/51 `param2` values are not mg/dL** — they appear to be pump-internal threshold encodings, constant across all activations of the same alert type.
 
 **Also observed: CGM alert dalertidRaw=2 is unmapped**
-`LidCgmAlertActivatedDex` with `dalertidRaw=2` fires frequently (tconnectsync only maps IDs 11, 13, 14, 20, 26, 27, 39, 40). Based on timing, it appears to be a **CGM high glucose alert** from the Dexcom G7 sensor itself (distinct from the pump-side Alert50). Its `param1` field contains the BG value at activation and `param2=180.0` which is likely the threshold.
+`LidCgmAlertActivatedDex` with `dalertidRaw=2` fires frequently (tconnectsync only maps IDs 11, 13, 14, 20, 26, 27, 39, 40). Based on timing, it appears to be a **CGM high glucose alert** from the Dexcom G7 sensor itself (distinct from the pump-side Alert50). Its `param1` field contains the BG value at activation and `param2` which is likely the threshold (owner-specific).
 
 **Full CGM alert map (dalertidRaw, all unmapped by tconnectsync):**
-- dalertidRaw=1 → `"cgm_urgent_low"` — fires at BG ~49, threshold 55 (param2). Rare.
-- dalertidRaw=2 → `"cgm_high"` — fires at BG ≥180, threshold 180 (param2). Fires frequently.
-- dalertidRaw=3 → `"cgm_low"` — fires at BG ≤75, threshold 75 (param2). Less frequent.
-- dalertidRaw=6 → `"cgm_rise_rate"` — rapid rise alert. param1 ~30-36 (rate?), param2=3.0 (mg/dL/min threshold).
-- dalertidRaw=8 → `"cgm_fall_rate"` — rapid fall alert. param1 is uint overflow (negative rate), param2=3.0.
+- dalertidRaw=1 → `"cgm_urgent_low"` — fires below the urgent-low threshold (param2). Rare.
+- dalertidRaw=2 → `"cgm_high"` — fires at or above the high threshold (param2). Fires frequently.
+- dalertidRaw=3 → `"cgm_low"` — fires at or below the low threshold (param2). Less frequent.
+- dalertidRaw=6 → `"cgm_rise_rate"` — rapid rise alert. param1 = observed rate, param2 = rate threshold (mg/dL/min, owner-specific).
+- dalertidRaw=8 → `"cgm_fall_rate"` — rapid fall alert. param1 is uint overflow (negative rate), param2 = rate threshold (owner-specific).
 - dalertidRaw=14 → `"cgm_out_of_range"` — **CGM signal lost.** Frequent; durations from minutes to a couple of hours. param1=20 (timeout minutes). Pump reverts to base basal rate during these windows.
 
 **Include in pipeline: YES — all of the above.** These should be in the `alarms.parquet` alongside pump-side alarms/alerts. The CGM out-of-range events (dalertidRaw=14) are especially critical — they define windows where the pump reverts to profile basal and the detection engine must know this. The BG threshold alerts (1, 2, 3) duplicate pump-side Alert50/51 but carry the actual BG value at activation in param1, which is more useful. The rate alerts (6, 8) are the only source for rapid-change detection from the sensor side.
@@ -183,7 +183,7 @@ This is distinct from the pump being dead (BatteryShutdownAlarm). During out-of-
 
 **Only two cgmDataTypeRaw values exist:** `1` (live) and `2` (backfill). No other values observed in the 5-day exploratory sample.
 
-**Scale of impact:** In the 5-day exploratory sample, roughly **30% of CGM readings were backfilled**. This is not an edge case — it's a major data source. Without capturing these, any day with a pump disconnection loses up to 3 hours of CGM data, distorting daily statistics and creating false gaps in the CGM trace.
+**Scale of impact:** In the 5-day exploratory sample, a **large fraction of CGM readings were backfilled**. This is not an edge case — it's a major data source. Without capturing these, any day with a pump disconnection loses up to 3 hours of CGM data, distorting daily statistics and creating false gaps in the CGM trace.
 
 **Fix needed in `build_cgm_df`:**
 1. Check `cgmDataTypeRaw` on each CGM event
@@ -191,7 +191,7 @@ This is distinct from the pump being dead (BatteryShutdownAlarm). During out-of-
 3. Add a `backfilled` boolean column (True for type 2) so downstream consumers know these readings weren't available to the pump in real time
 4. Backfilled readings currently all share the same `eventTimestamp` (the reconnection moment), so they dedup to 1 row. The dedup key must include `seqNum` or `egvTimestamp` to preserve them
 
-**Include in pipeline: YES — 30% of all CGM data.** These readings are real sensor measurements. Dropping them creates false gaps and distorts daily statistics.
+**Include in pipeline: YES — a large fraction of all CGM data.** These readings are real sensor measurements. Dropping them creates false gaps and distorts daily statistics.
 
 **Status: Resolved in `35041db` (supersedes `ec6d18f`).** `build_cgm_df` now preserves `cgmDataTypeRaw=2` rows (dedup key includes `seqNum`/`egvTimestamp`) and adds a `backfilled` boolean column; backfilled readings are also exempt from the <60 s stale filter from Issue #1.
 

@@ -41,8 +41,8 @@ Each section has its own header row. Sections are separated by blank lines. The 
 | DeviceType | str | `t:slim X2™ Insulin Pump` | Constant |
 | SerialNumber | int | `<pump-serial>` | Constant for this export |
 | Description | str | `EGV` | Constant |
-| EventDateTime | str | `2026-02-21T00:03:01` | ISO 8601, **no timezone** |
-| Readings (mg/dL) | int | `127` | BG value (illustrative) |
+| EventDateTime | str | `2026-01-01T12:00:00` (illustrative) | ISO 8601, **no timezone** |
+| Readings (mg/dL) | int | `<int>` | BG value |
 
 ### 2.2 Manual BG Section
 
@@ -59,7 +59,7 @@ Each section has its own header row. Sections are separated by blank lines. The 
 | BolusDeliveryMethod | str | `Standard`, `Auto` | Standard = user-initiated, Auto = CIQ algorithm |
 | BG (mg/dL) | int | `<int>` | BG at time of bolus |
 | SerialNumber | int | `<pump-serial>` | Constant |
-| CompletionDateTime | str | `2026-02-21T00:15:56` (illustrative) | ISO 8601, **no timezone** |
+| CompletionDateTime | str | `2026-01-01T12:00:00` (illustrative) | ISO 8601, **no timezone** |
 | InsulinDelivered | float | `5.0` | Total units delivered (illustrative) |
 | FoodDelivered | float | `5.0` | Insulin portion for carbs (illustrative) |
 | CorrectionDelivered | float | `0` | Insulin portion for correction |
@@ -395,21 +395,21 @@ Not yet implemented. Will provide real-time Dexcom G7 CGM readings every 5 minut
 
 ### Bug 2: `commandedRate` is milliunits/hr, not u/hr ✅ RESOLVED
 
-**Problem:** The notebook documents `commandedRate` as "already in u/hr" and does not divide. But `basal_df.describe()` shows a mean in the low thousands and a max several times higher.
+**Problem:** The notebook documents `commandedRate` as "already in u/hr" and does not divide. But `basal_df.describe()` shows values far too large to be u/hr (consistent with milliunits/hr).
 
-**Verification:** Raw `commandedRate` values are in the thousands (e.g. ~1000-1500 for typical profile segments). Dividing by 1000 yields a few u/hr, matching the pump profile range; the max raw value divided by 1000 is a plausible Control-IQ auto-correction rate.
+**Verification:** Raw `commandedRate` values are integers in milliunits/hr (1000 = 1.0 u/hr). Dividing by 1000 yields u/hr values consistent with the programmed pump profile, and the max is a plausible Control-IQ auto-correction rate.
 
 **Conclusion:** `commandedRate` is in milliunits/hr. Divide by 1000 when building `basal_df`.
 
 ### Issue 3: CSV timestamps lack timezone
 
-CSV `EventDateTime` values (e.g., `2026-02-21T00:03:01`) have no timezone offset. API timestamps include it (e.g., `2026-02-26T20:53:13-08:00`).
+CSV `EventDateTime` values (e.g., `2026-01-01T12:00:00`, illustrative) have no timezone offset. API timestamps include it (e.g., `2026-01-01T12:00:00-08:00`, illustrative).
 
 **Resolution:** Ingestion must attach the configured timezone when parsing CSV timestamps.
 
 ### Issue 4: Duplicate CGM readings (API only)
 
-Notebook `cgm_df` rows 2–3 show identical timestamps (`2026-02-26 21:08:27`) with values 146 and 147. Verified: CSV EGV data has **zero** duplicate timestamps — this is an API-only issue.
+Notebook `cgm_df` rows 2–3 showed identical timestamps with two adjacent, slightly different values. Verified: CSV EGV data has **zero** duplicate timestamps — this is an API-only issue.
 
 **Resolution:** Deduplicate API CGM readings — keep one per 5-min interval.
 
