@@ -18,16 +18,19 @@
 
 ## 0. Background and motivation
 
+> **Branch note:** the three detection modules cited below, `detection/iob.py`, `detection/deviation.py` and `detection/deviation_categorize.py`, **do not exist on `main`**. They live only on the unmerged exploratory branch `research/algorithm-improvements` (PR #10), along with `docs/algorithm-research-findings.md`. This plan does not depend on PR #10 merging. The ingestion and storage changes stand alone. Any references to "replacing a surrogate in `detection/iob.py`" describe the consumer that M4 is expected to inherit from that branch.
+
 The exploratory research PR #10 (`research/algorithm-improvements`, `docs/algorithm-research-findings.md` §2 Q1–Q3 and §9) concluded the following:
 
-- `detection/iob.py` currently estimates the "profile basal rate" as a **trailing 7-day median of `commanded_rate`**, because `profileBasalRate` is not ingested (`basal_baseline_rate`). Under Control-IQ that surrogate absorbs the algorithm's own modulation into "baseline", which biases every basal-excursion pseudo-dose.
-- `detection/deviation.py::DeviationConfig.isf_mgdl_per_unit` deliberately has **no default**. The ISF used by the bolus calculator is on every `LidBolusRequestedMsg2`, but `build_request_df` drops it. Capturing it allows a piecewise-constant ISF schedule taken from the pump's own records, rather than a guessed constant.
-- `detection/deviation_categorize.py` cannot separate "user's basal profile" from "Control-IQ's decision" without the profile/algorithm split. That split is exactly what an Autotune-style basal report needs.
+- **PR #10's `detection/iob.py`** estimates the "profile basal rate" as a **trailing 7-day median of `commanded_rate`** (`basal_baseline_rate`), because `profileBasalRate` is not ingested. Under Control-IQ that surrogate absorbs the algorithm's own modulation into "baseline", which biases every basal-excursion pseudo-dose.
+- **PR #10's `detection/deviation.py`** gives `DeviationConfig.isf_mgdl_per_unit` deliberately **no default**. The ISF the bolus calculator used is on every `LidBolusRequestedMsg2`, but `build_request_df` on `main` drops it. Capturing it allows a piecewise-constant ISF schedule built from the pump's own records, not a guessed constant.
+- **PR #10's `detection/deviation_categorize.py`** cannot separate "the user's basal profile" from "Control-IQ's decision" without the profile/algorithm split. An Autotune-style basal report needs exactly that split.
 
-M4 in `docs/plans/2026-05-23-v2-development-roadmap.md` asks for "effective insulin sensitivity tracking and an Autotune-style settings report … surfaced as observation rather than auto-applied." Both halves need three inputs per instant:
+M4 in `docs/plans/2026-05-23-v2-development-roadmap.md` asks for "effective insulin sensitivity tracking and an Autotune-style settings report … surfaced as observation rather than auto-applied". Both parts need three inputs at every instant:
+
 1. the **programmed** settings in force (profile basal, ISF, CR, target);
 2. what the **algorithm** actually did (algorithm rate, auto-correction boluses);
-3. the pump's own **IOB** estimate, which is a reference for validating `detection/iob.py`'s reconstruction.
+3. the pump's own **IOB** estimate, as a reference for validating whatever IOB reconstruction M4 adopts (for example PR #10's).
 
 Every one of these is already in the event stream. None of them is persisted today.
 
@@ -35,82 +38,77 @@ Every one of these is already in the event stream. None of them is persisted tod
 
 ## 1. Empirical field inventory (verified 2026-10-14)
 
-**Method:**
-- Ran a read-only fetch through the existing `ingestion.client.get_api` → `get_pump_metadata` → `fetch_pump_events`, using `uv run --with tconnectsync==3.0.3`.
-- The `tconnectsync` loggers were held at WARNING.
-- Picked the pump with the latest `availableDataRange` at runtime (6 pumps on the account have data).
-- Window: 2026-08-10 → 2026-08-12, which is 5,807 events in total.
-- Collected only aggregates: attribute names, Python types, min/max, distinct counts.
-- No identifiers were printed or recorded, and no raw dump is committed.
+**Method**
 
-> **Public-repo note:** this repo is public. The ranges below are bounds, as requested. The owner's time-of-day schedules (which hour maps to which ISF or basal segment) are **deliberately omitted**, because together they would reconstruct the full therapy profile. Implementers must not add them to fixtures, docs or test names. Use synthetic values in tests.
+- I ran a read-only fetch through the existing `ingestion.client.get_api` → `get_pump_metadata` → `fetch_pump_events`, with `uv run --with tconnectsync==3.0.3` and the `tconnectsync` loggers at WARNING.
+- The pump with the latest `availableDataRange` was chosen at runtime.
+- The window was two days (2026-08-10 → 2026-08-12).
+- Only aggregates were collected. No identifiers were printed or recorded, and no raw dump is committed.
 
-### 1.1 Event classes relevant to M4 (counts in the 2-day window)
+> **Public-repo rule:** this repo is public. This section therefore documents fields by **type, units and encoding only**. It deliberately leaves out:
+> - observed values;
+> - the owner's therapy settings (ISF, carb ratio, target BG, basal profile and their schedules);
+> - dosing and BG ranges;
+> - event volumes;
+> - account details.
+>
+> Implementers must not add real values to fixtures, docs, test names or update notes. Use obviously synthetic values in tests, e.g. ISF 50 or profile rate 800 mU/hr.
 
-| Class (tconnectsync 3.0.3) | n | Field: type, observed range, units | Handling today |
-|---|---|---|---|
-| `LidBasalDelivery` | 857 | `commandedRateSourceRaw`: int {0,1,3} (0 suspended, 1 profile, 3 algorithm; 2 and 4 not seen) | **kept** as `basal.rate_source` (enum) |
-| | | `commandedRate`: int 0–9150 **milli-U/hr** | **kept** as `basal.commanded_rate` (÷1000, U/hr) |
-| | | `profileBasalRate`: int 1000–1550 milli-U/hr, 4 distinct values; never sentinel | **DROPPED** |
-| | | `algorithmRate`: int 0–9150 milli-U/hr, or **65535 sentinel** when source ≠ algorithm (232 profile rows + 31 suspended rows) | **DROPPED** |
-| | | `tempRate`: int, **always 65535 sentinel** in this window (no temp basal was run) | **DROPPED** |
-| `LidBolusRequestedMsg1` | 39 | `bolusId` int; `carbAmount` int 0–65 g; `bg` int 0–394 mg/dL; `iob` float 0–20.6 U | **kept** (`requests.carbs_g/bg_mgdl/iob`) |
-| | | `bolusTypeRaw`: int {1,2,3} (1 Carb, 2 Automatic Correction, 3 Remote; 0 Insulin not seen) | **DROPPED** |
-| | | `correctionBolusIncludedRaw`: int {0,1} | **DROPPED** |
-| | | `carbRatioRaw`: int {0, one non-zero value in the low thousands}. **0 on every auto (type 2) and remote (type 3) request.** tconnectsync comments it as "g/u", but the magnitude implies ×1000 scaling (unverified, see §8 D1) | **DROPPED** |
-| `LidBolusRequestedMsg2` | 39 | `optionsRaw` int {0,3,4}; `userOverrideRaw` int {0,1} | **transformed** into `requests.bolus_source` |
-| | | `isf`: int, 3 distinct non-zero values in 18–23 mg/dL per U, or **0 sentinel** (the one `optionsRaw=4` / remote row). **Present and non-zero on Control-IQ auto-corrections.** | **DROPPED** |
-| | | `targetBg`: int {0, 110} mg/dL, with **0 sentinel** on the same row as `isf=0` | **DROPPED** |
-| | | `declinedCorrectionRaw` int {0}; `selectedIobRaw` {1}; `standardPercent` {100}; `duration` {0} | **DROPPED** (low value; `declinedCorrectionRaw` captured, see §2) |
-| `LidBolusRequestedMsg3` | 39 | `foodBolusSize` 0–15.5 U; `correctionBolusSize` 0–9.9 U; `totalBolusSize` 0.025–17.5 U | **kept** (`food_insulin/correction_insulin/total_requested`) |
-| `LidBolusCompleted` | 39 | `insulinDelivered` 0.025–17.5 U | **kept** (`bolus.insulin_units`) |
-| | | `insulinRequested` 0.025–17.5 U; differs from delivered on 2/39 boluses | **DROPPED** |
-| | | `iob` float 2.4–29.7 U. This is IOB at completion, and it always exceeds Msg1's pre-bolus `iob` | **DROPPED** |
-| | | `completionStatusRaw` int {3} | **DROPPED** |
-| `LidDailyBasal` | 407 | `dailyTotalBasal` float 0–40.1 U (running daily total); `lastBasalRate` float 0–9.15 U/hr; `iob` float 0–29.3 U. Spacing: median 10 min, min 0.27 min, max 60 min | **DROPPED entirely.** It is in `_HANDLED_TYPES`, so it is silenced as "known" but no builder reads it |
-| | | `batteryChargePercent{MSB,LSB}Raw`, `batteryLipoMilliVolts`: always None on the JSON path | n/a |
-| `LidBgReadingTaken` | 36 | `bg` int 120–394 mg/dL; `iob` float 0–24.4 U; `isf` int (same 3 values as Msg2); `targetBg` {110}; `bgEntryTypeRaw` {0,1}; `bgSourceTypeRaw` {0,1}; `cgmCalibrationRaw` {0} | **DROPPED entirely** (silenced in `_HANDLED_TYPES`) |
-| `LidAaPcmChange` | 15 | `currentPcmRaw`/`previousPcmRaw` int {0,2,3} | **kept** as `events` rows with `event_type='pcm_change'`; previous goes in `details.previous_pcm` |
-| | | `pumpSuspendedRaw` {0,1}; `cgmAvailableRaw` {0,1}; `calculationAvailableRaw` {1}; `closedLoopPreferredRaw` {1}; `sufficientClosedLoopParamsRaw` {1} | **DROPPED** (§2 Tier 2: add to `details`) |
-| `LidAaUserModeChange` | 6 | `currentUserModeRaw`/`previousUserModeRaw` {0,1}; `requestedActionRaw` {1,2}; `exerciseTime` {90} | **kept** (`events` mode_change) |
-| | | `exerciseChoiceRaw`, `activeSleepScheduleRaw` {0,2}, `sleepStartedByGuiRaw`, `exerciseStoppedByTimerRaw`, `eatingSoonStoppedByTimerRaw` | **DROPPED** (not M4-relevant; leave) |
-| `LidAaDailyStatus` | 3 | `pumpControlStateRaw` {2,3}; `usermodeRaw` {0,1} | **kept** (`events` daily_status details) |
-| | | `sensorTypeRaw` {3} | **DROPPED** (leave) |
-| `LidNewDay` | 3 | `commandedBasalRate` float (U/hr) | **kept** (`events.details`) |
-| `LidBolusDelivery` | 78 | `bolusSourceRaw` {1,7,8}; `bolusTypeRaw` bitmask {5,9,13,17,25}; `requestedNow`/`deliveredTotal`/`correction` in milli-units; `remoteId` | **DROPPED** (Tier 3: redundant with requests + bolus for M4) |
-| `LidBolusActivated` | 39 | `iob` 0–20.6 U; `bolusSize` 0.025–17.5 U | **DROPPED** (redundant with Msg1/Msg3) |
+### 1.1 Event classes relevant to M4
 
-**Verified invariants (for tests and docstrings):**
-- When `commandedRateSourceRaw == 3`, `commandedRate == algorithmRate` (594/594).
-- When `commandedRateSourceRaw == 1`, `commandedRate == profileBasalRate` (232/232).
+| Class (tconnectsync 3.0.3) | Field: type, units, encoding | Handling today |
+|---|---|---|
+| `LidBasalDelivery` | `commandedRateSourceRaw`: int enum (0 suspended, 1 profile, 2 temp, 3 algorithm, 4 temp+algorithm). Only 0/1/3 were observed. | **kept** as `basal.rate_source` (enum) |
+| | `commandedRate`: int, **milli-U/hr** | **kept** as `basal.commanded_rate` (÷1000, U/hr) |
+| | `profileBasalRate`: int, milli-U/hr. Populated on every row in the sample, never a sentinel. | **DROPPED** |
+| | `algorithmRate`: int, milli-U/hr. **65535 (UINT16_MAX) = not applicable** whenever the source is not "algorithm". | **DROPPED** |
+| | `tempRate`: int, milli-U/hr. **65535 = no temp basal active.** Only the sentinel was observed. | **DROPPED** |
+| `LidBolusRequestedMsg1` | `bolusId`, `carbAmount` (g), `bg` (mg/dL; 0 = none entered), `iob` (U, float) | **kept** (`requests.carbs_g/bg_mgdl/iob`) |
+| | `bolusTypeRaw`: int enum (0 Insulin, 1 Carb, 2 Automatic Correction, 3 Remote). 1/2/3 were observed. | **DROPPED** |
+| | `correctionBolusIncludedRaw`: int bool (0/1) | **DROPPED** |
+| | `carbRatioRaw`: int. **0 = not applicable** on auto-correction (type 2) and remote (type 3) requests. tconnectsync comments it as "g/u", but the magnitude implies ×1000 fixed-point. Unverified, see §8 D1. | **DROPPED** |
+| `LidBolusRequestedMsg2` | `optionsRaw` int; `userOverrideRaw` int bool | **transformed** into `requests.bolus_source` |
+| | `isf`: int, mg/dL per U. **0 = not applicable** (seen on a remote-bolus row). It **is populated on Control-IQ auto-corrections.** | **DROPPED** |
+| | `targetBg`: int, mg/dL. **0 = not applicable**, appearing on the same rows as `isf = 0`. | **DROPPED** |
+| | `declinedCorrectionRaw` int bool; `selectedIobRaw`, `standardPercent` (%), `duration` (min): low value | **DROPPED** (`declinedCorrectionRaw` is captured, see §2) |
+| `LidBolusRequestedMsg3` | `foodBolusSize`, `correctionBolusSize`, `totalBolusSize`: float, U | **kept** (`food_insulin/correction_insulin/total_requested`) |
+| `LidBolusCompleted` | `insulinDelivered`: float, U | **kept** (`bolus.insulin_units`) |
+| | `insulinRequested`: float, U. It differed from delivered on a small number of boluses in the sample (partial or interrupted delivery). | **DROPPED** |
+| | `iob`: float, U. This is IOB at completion; it was always greater than Msg1's pre-bolus `iob`. | **DROPPED** |
+| | `completionStatusRaw`: int enum. Only one value was observed; the mapping is unverified. | **DROPPED** |
+| `LidDailyBasal` | `dailyTotalBasal` (U, running daily total), `lastBasalRate` (U/hr), `iob` (U), all float. Typical spacing is ~10 min, but consecutive events can be **< 1 min apart**. | **DROPPED entirely.** It is in `_HANDLED_TYPES`, so it is silenced as "known", but no builder reads it. |
+| | `batteryChargePercent{MSB,LSB}Raw`, `batteryLipoMilliVolts`: always None on the JSON path | n/a |
+| `LidBgReadingTaken` | `bg` (mg/dL), `iob` (U), `isf` (mg/dL/U), `targetBg` (mg/dL), `bgEntryTypeRaw`, `bgSourceTypeRaw`, `cgmCalibrationRaw` (int codes; mapping unverified) | **DROPPED entirely** (silenced in `_HANDLED_TYPES`) |
+| `LidAaPcmChange` | `currentPcmRaw`/`previousPcmRaw`: int enum | **kept** as `events` rows with `event_type='pcm_change'`; the previous value goes in `details.previous_pcm` |
+| | `pumpSuspendedRaw`, `cgmAvailableRaw`, `calculationAvailableRaw`, `closedLoopPreferredRaw`, `sufficientClosedLoopParamsRaw`: int bools | **DROPPED** (§2 Tier 2: add to `details`) |
+| `LidAaUserModeChange` | current/previous user mode, requested action, exercise time (min) | **kept** (`events` mode_change) |
+| | sleep/exercise/eating-soon timer and schedule flags | **DROPPED** (not M4-relevant; leave as is) |
+| `LidAaDailyStatus` | `pumpControlStateRaw`, `usermodeRaw` | **kept** (`events` daily_status details) |
+| | `sensorTypeRaw` | **DROPPED** (leave as is) |
+| `LidNewDay` | `commandedBasalRate`: float, U/hr | **kept** (`events.details`) |
+| `LidBolusDelivery` | `bolusSourceRaw`, `bolusTypeRaw` (bitmask), `requestedNow`/`deliveredTotal`/`correction` (milli-U), `remoteId` | **DROPPED** (Tier 3: redundant with requests + bolus for M4) |
+| `LidBolusActivated` | `iob` (U), `bolusSize` (U) | **DROPPED** (redundant with Msg1/Msg3) |
+
+**Verified invariants (all rows in the sample; for tests and docstrings)**
+
+- When `commandedRateSourceRaw == 3`, `commandedRate == algorithmRate`.
+- When `commandedRateSourceRaw == 1`, `commandedRate == profileBasalRate`.
 - `algorithmRate == 65535` exactly when the source is not 3.
-- **No duplicate `LidBasalDelivery` timestamps** in the window (0/857). This matters because the `basal` PK is `(pump_serial, timestamp)`.
-- `LidBasalDelivery` spacing: min 2.7, median 5.0, max 9.8 minutes. It is close to a 5-minute cadence under Control-IQ.
-- `LidDailyBasal` can be sub-minute apart (0.27 min min), so it **must** be keyed by `seqnum`, not timestamp.
-- Event timestamps are tz-aware `America/Los_Angeles`.
+- There were **no duplicate `LidBasalDelivery` timestamps** within the 2-day sample. The `basal` PK is `(pump_serial, timestamp)`. This is a small sample, though, so §5 Task 7a still dedupes every batch by PK before any `DO UPDATE`.
+- `LidBasalDelivery` arrives at roughly a 5-minute cadence under Control-IQ (event-driven, not a fixed grid).
+- `LidDailyBasal` events can be under a minute apart, so the table **must** be keyed by `seqnum`, not timestamp.
+- Event timestamps are tz-aware, in the pump's configured local zone.
 
-**Not verified (do not assume):**
-- Temp-rate semantics (`commandedRateSourceRaw` 2 and 4 and a non-sentinel `tempRate`), because no temp basal was run in the window.
-- `bolusTypeRaw = 0` (plain "Insulin" bolus).
-- Whether `profileBasalRate` is populated on pre-v3, older-pump history.
+**Not verified (do not assume)**
+
+- Temp-rate semantics: `commandedRateSourceRaw` 2/4 and a non-sentinel `tempRate` never appeared.
+- `bolusTypeRaw = 0` (a plain "Insulin" bolus).
+- The `completionStatusRaw` mapping.
+- Whether `profileBasalRate` is populated on older-pump history.
 
 ### 1.2 Unparsed events (out of scope, recorded for completeness)
 
-On the JSON path, tconnectsync 3.0.3 returns a bare `RawEvent` for these event codes. `RawEvent.build_from_json` keeps only the code, the timestamp and the seqnum, and discards `eventProperties`:
-
-| eventCode | n (2 days) |
-|---|---|
-| 219 | 1563 |
-| 22 | 592 |
-| 23 | 592 |
-| 434 | 512 |
-| 9 | 65 |
-| 27 | 24 |
-| 8 | 2 |
-| 34 | 1 |
-| 35 | 1 |
-
-They are not guessed at here. Capturing them would need either an upstream tconnectsync change or a bypass of its typed parser. That is a separate decision (§8 D6).
+On the JSON path, tconnectsync 3.0.3 returns a bare `RawEvent` for event codes **219, 22, 23, 434, 9, 27, 8, 34, 35**. `RawEvent.build_from_json` keeps only the code, the timestamp and the seqnum, and discards `eventProperties`. Several of these codes are high-volume. This plan does not guess what they are. Capturing them would need an upstream tconnectsync change or a bypass of its typed parser, which is a separate decision (§8 D6).
 
 ### 1.3 Current storage surfaces (as of `origin/main` 7f6cdad)
 
@@ -136,17 +134,17 @@ They are not guessed at here. Capturing them would need either an upstream tconn
 
 | New field | Source | Why M4 needs it |
 |---|---|---|
-| `basal.profile_basal_rate` (U/hr) | `LidBasalDelivery.profileBasalRate` / 1000 | Replaces the rolling-median surrogate in `detection/iob.py::basal_baseline_rate`. It is the "programmed" baseline that an Autotune-style basal report compares against. |
-| `basal.algorithm_rate` (U/hr, NULL when the sentinel is 65535) | `.algorithmRate` / 1000 | Separates Control-IQ's decision from the profile. (`commanded_rate` alone is the blend.) This lets `deviation_categorize` attribute deviations to the algorithm instead of the profile. |
+| `basal.profile_basal_rate` (U/hr) | `LidBasalDelivery.profileBasalRate` / 1000 | Lets M4 replace the rolling-median surrogate in PR #10's `detection/iob.py::basal_baseline_rate` (research branch, not on `main`). It is the "programmed" baseline that an Autotune-style basal report compares against. |
+| `basal.algorithm_rate` (U/hr, NULL when the sentinel is 65535) | `.algorithmRate` / 1000 | Separates Control-IQ's decision from the profile. (`commanded_rate` alone is the blend.) This lets PR #10's `deviation_categorize` (research branch) attribute deviations to the algorithm instead of the profile. |
 | `basal.temp_rate` (U/hr, NULL when the sentinel is 65535) | `.tempRate` / 1000 | Same purpose, for user temp basals. Semantics unverified (§1.1); captured raw-but-nulled so it is available once observed. |
 | `requests.isf_mgdl_per_u` (NULL when 0) | `LidBolusRequestedMsg2.isf` | The **programmed** ISF in force at each bolus, which gives the pump-sourced ISF schedule for `DeviationConfig`. Effective-ISF tracking is defined *relative to* this value. |
 | `requests.target_bg_mgdl` (NULL when 0) | `Msg2.targetBg` | The correction target in force. Needed to back out the calculator's correction math and to compare against observed outcomes. |
 | `requests.carb_ratio_g_per_u` (NULL when 0) | `Msg1.carbRatioRaw` (scale per §8 D1) | The programmed CR, used by the CSF/CR half of an Autotune-style report. |
 | `requests.request_type` (text) | `Msg1.bolusTypeRaw` → `insulin`/`carb`/`auto_correction`/`remote`/`unknown_<n>` | Distinguishes Control-IQ auto-corrections from user boluses using the pump's own label, independent of the `optionsRaw` heuristic in `_derive_bolus_source`. Useful as a cross-check, and it decides when ISF/CR sentinels are expected. |
 | `requests.correction_included` (bool) | `Msg1.correctionBolusIncludedRaw` | Lets M4 tell whether the correction part of a bolus was accepted. That decides whether ISF was actually exercised. |
-| `requests.declined_correction` (bool) | `Msg2.declinedCorrectionRaw` | Same purpose (always 0 in the sample, but cheap to keep). |
-| `bolus.insulin_requested` (U) | `LidBolusCompleted.insulinRequested` | Requested versus delivered. It catches interrupted or partial boluses (2/39 in the sample), which would otherwise be mis-attributed in effective-ISF fits. |
-| `bolus.iob_at_completion` (U) | `LidBolusCompleted.iob` | The pump's IOB right after the bolus. It is a validation point for `detection/iob.py`. |
+| `requests.declined_correction` (bool) | `Msg2.declinedCorrectionRaw` | Same purpose (it never fired in the sample, but it costs little to keep). |
+| `bolus.insulin_requested` (U) | `LidBolusCompleted.insulinRequested` | Requested versus delivered. It catches interrupted or partial boluses (a few appear in the sample), which would otherwise be mis-attributed in effective-ISF fits. |
+| `bolus.iob_at_completion` (U) | `LidBolusCompleted.iob` | The pump's IOB right after the bolus. It is a validation point for whatever IOB reconstruction M4 adopts (for example PR #10's `detection/iob.py`, research branch). |
 | `bolus.completion_status` (smallint) | `LidBolusCompleted.completionStatusRaw` | Lets M4 exclude non-normal completions. Stored raw; the enum mapping is unverified. |
 | **new table `pump_iob`** | `LidDailyBasal` | The pump's own IOB time series (~10-minute cadence) plus the running daily basal total. This is **ground truth for validating** the IOB reconstruction, which is the single biggest correctness risk in M4. |
 
@@ -202,7 +200,7 @@ COMMENT ON COLUMN bolus.insulin_requested IS
 COMMENT ON COLUMN bolus.iob_at_completion IS
     'Pump-reported insulin on board at bolus completion (U). Validation reference for reconstructed IOB.';
 COMMENT ON COLUMN bolus.completion_status IS
-    'Raw LidBolusCompleted.completionStatusRaw (3 observed for normal completion). Unmapped on purpose.';
+    'Raw LidBolusCompleted.completionStatusRaw (single value observed; mapping unverified). Unmapped on purpose.';
 
 -- requests --------------------------------------------------------------------
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS isf_mgdl_per_u      smallint     NULL;
@@ -277,8 +275,8 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 **Type choices:**
 - `numeric(6,3)` matches the existing insulin columns (no float drift).
-- `pump_iob.daily_total_basal` uses `numeric(7,3)` as headroom past the observed 40 U.
-- `carb_ratio_g_per_u` uses `numeric(7,3)` so that a mis-scaled 4200 still fits if D1 resolves to "raw is already g/U". That is a defensive choice, not a prediction.
+- `pump_iob.daily_total_basal` uses `numeric(7,3)` to give headroom over a running daily total.
+- `carb_ratio_g_per_u` uses `numeric(7,3)` so that a four-digit raw value still fits if D1 resolves to "raw is already g/U". That is a defensive choice, not a prediction.
 - `request_type` is `text`, not an enum, following the `events.event_subtype` precedent for open vocabularies whose upstream values are not fully observed.
 
 ---
@@ -435,12 +433,37 @@ The nightly sync alone therefore populates new columns **only for rows first wri
   - `test_upsert_fill_columns_does_not_touch_unlisted_columns`.
   - `test_upsert_default_still_do_nothing`, a regression guard.
   - `test_upsert_fill_columns_rejects_pk_columns`.
+  - `test_upsert_fill_columns_sentinel_nulls_not_counted`: an existing row whose `algorithm_rate` is NULL because of a sentinel, re-sent with NULL again, gives `rows_filled == 0`.
+  - `test_upsert_fill_columns_rerun_reports_zero`: run the same fill twice; the second run reports `rows_filled == 0`.
 - [ ] **Step 2:** Run. Expected: FAIL.
 - [ ] **Step 3: Implement** `upsert_table(name, df, *, fill_columns: Sequence[str] | None = None)`. The default `None` keeps today's behaviour exactly.
-  - **Supabase:** when `fill_columns` is set, the statement becomes `ON CONFLICT (pk) DO UPDATE SET c = COALESCE(t.c, EXCLUDED.c), … WHERE t.c1 IS NULL OR t.c2 IS NULL …`, aliasing the target table as `t`. Count updated rows separately: extend `UpsertResult` with `rows_filled: int = 0`. Validate `fill_columns` against `COLUMN_SPECS[name]` and reject PK columns.
-  - **Parquet and in-memory:** align on the PK, `existing[c] = existing[c].fillna(incoming[c])` for each fill column only, then the normal keep-first concat for new rows.
+  - **Supabase:** when `fill_columns` is set, the statement becomes `ON CONFLICT (pk) DO UPDATE SET c1 = COALESCE(t.c1, EXCLUDED.c1), … WHERE (t.c1 IS NULL AND EXCLUDED.c1 IS NOT NULL) OR (t.c2 IS NULL AND EXCLUDED.c2 IS NOT NULL) …`, aliasing the target table as `t`.
+    - The guard requires a **non-NULL incoming value for a NULL target**. A plain `t.c IS NULL` would also match sentinel-derived NULLs (for example `algorithm_rate` on every profile or suspended row), so every run would rewrite those rows, inflate the count, and never report zero.
+    - With this guard, Postgres skips the UPDATE when no value would actually change. `cur.rowcount` then counts real fills plus new inserts.
+    - To report fills separately, append `RETURNING (xmax = 0) AS inserted` and count the false values as `rows_filled`. This is the standard insert-versus-update discriminator for `ON CONFLICT`.
+    - Extend `UpsertResult` with `rows_filled: int = 0`. Validate `fill_columns` against `COLUMN_SPECS[name]`, and reject PK columns.
+  - **Sentinel NULLs stay NULL forever, by design.** The fill path has no separate "filled" marker. A NULL that is a sentinel is indistinguishable from a NULL that has not yet been backfilled, and that is acceptable. The guard makes re-runs no-ops either way. Backfill completeness is checked with the Task 8 null-rate report, which compares raw-sentinel counts in the re-fetched frame with NULL counts in storage. A stored marker is not needed for that.
+  - **Parquet and in-memory:** align on the PK, `existing[c] = existing[c].fillna(incoming[c])` for each fill column only, then the normal keep-first concat for new rows. `rows_filled` = the number of existing rows where at least one fill column went from NaN to non-NaN (the same semantics as the SQL guard).
 - [ ] **Step 4:** Run `uv run pytest tests/core -q`. Expected: PASS.
 - [ ] **Step 5:** Commit with `feat(storage): opt-in fill_columns upsert for additive backfills`.
+
+### Task 7a: Dedupe each batch by PK before a fill upsert
+
+**Why:** `INSERT … ON CONFLICT DO UPDATE` raises `ON CONFLICT DO UPDATE command cannot affect row a second time` (CardinalityViolation) if a single statement contains two rows with the same PK. The current `DO NOTHING` path tolerates such duplicates silently. Only one 2-day window was checked for duplicate `basal` timestamps, so history may contain them (DST fall-back, the TZ-repair window, v2/v3 decode differences). Chunk boundaries in `fetch_pump_events` also overlap by a day.
+
+**Files:** `core/storage/supabase.py`, `core/storage/parquet.py`, `core/storage/memory.py`, `tests/core/test_storage_contract.py`, `tests/core/test_supabase_storage.py`.
+
+- [ ] **Step 1: Failing tests:**
+  - `test_upsert_fill_columns_tolerates_duplicate_pk_in_batch`, parameterized over all backends: a frame with two rows sharing `(pump_serial, timestamp)` must not raise. The first row by input order wins, matching the keep-first semantics used everywhere else.
+  - `test_upsert_fill_dedupe_logs_dropped_count`: a WARNING log carries the table name and the dropped-row count, and never an unmasked serial.
+  - `test_upsert_default_path_unchanged_with_duplicates`, a regression guard for the `DO NOTHING` path.
+- [ ] **Step 2:** Run `uv run pytest tests/core -q`. Expected: FAIL. The Supabase case needs `SUPABASE_TEST_URL`. Without it, cover the dedupe with a unit test of the pre-processing helper.
+- [ ] **Step 3: Implement** a shared helper `_dedupe_on_pk(df, spec) -> (df, n_dropped)` that does `drop_duplicates(subset=spec.primary_key, keep="first")` and logs when `n_dropped > 0`.
+  - Call it at the top of `upsert_table` whenever `fill_columns` is set, **before** chunking, so that no chunk (and no statement) can hold a duplicate PK.
+  - Applying it unconditionally is also acceptable and harmless, because `DO NOTHING` already keeps the first row. Decide in review.
+  - Expose `n_dropped` as `UpsertResult.rows_deduped: int = 0`.
+- [ ] **Step 4:** Run. Expected: PASS.
+- [ ] **Step 5:** Commit with `fix(storage): dedupe batch on PK before ON CONFLICT DO UPDATE`.
 
 ### Task 8: Sync script backfill flags and the PK-alignment dry-run
 
@@ -460,6 +483,7 @@ The nightly sync alone therefore populates new columns **only for rows first wri
     3. Print the per-table counts and match rate.
     4. Write nothing.
   - Log fill counts with `rows_filled`. Never log serials unmasked (reuse `_mask_serial`).
+  - After each fill chunk, log a **completeness report** per new column: the number of rows whose raw value in the fetched frame is a non-sentinel, versus the number of matching stored rows still NULL. The second number should reach 0. It is reported as counts only, never values.
 - [ ] **Step 4:** Run. Expected: PASS.
 - [ ] **Step 5:** Commit with `feat(sync): --fill-new-columns backfill + --check-pk-alignment dry-run`.
 
@@ -493,14 +517,15 @@ The nightly sync alone therefore populates new columns **only for rows first wri
 1. **Forward capture (automatic).** Once the code is deployed, the nightly sync writes the new columns on every *newly inserted* row. Its window overlaps the previous day by one day. Overlap rows that already exist hit `DO NOTHING`, so they keep NULLs. The one-shot fill below covers them.
 2. **New tables (automatic plus one-shot).** `pump_iob`/`bg_readings` are plain inserts, so `ON CONFLICT DO NOTHING` is already correct and idempotent. The historical window is covered by the same one-shot run.
 3. **One-shot historical fill (Supabase).** Run `uv run --with tconnectsync==3.0.3 python -m scripts.sync_tandem_to_supabase --start A --end B [--only SERIAL] --fill-new-columns`, in chunks of 30–90 days, newest first.
-   - It is **idempotent**: `COALESCE(t.c, EXCLUDED.c)` with a `WHERE … IS NULL` guard means a re-run fills nothing new and never overwrites.
+   - It is **idempotent**: `COALESCE(t.c, EXCLUDED.c)` with a `WHERE (t.c IS NULL AND EXCLUDED.c IS NOT NULL)` guard means a re-run fills nothing new, never overwrites, and **reports `rows_filled == 0`**, even for rows whose new column is permanently NULL because of a sentinel (Task 7).
+   - It is **batch-safe**: each batch is deduped on PK before the `DO UPDATE` (Task 7a), so duplicate PKs in history or across overlapping chunks cannot abort the run.
    - It is **resumable**: re-run any chunk freely.
    - It is **non-destructive**: it never touches columns outside `NEW_COLUMNS_V5`, and never deletes.
 4. **Gate before step 3: the PK alignment dry-run.** `basal` is keyed on `(pump_serial, timestamp)`, not seqnum. History was written by (a) v2 byte decode, (b) v3 JSON, and (c) the `repair_nightly_sync_tz.py` +3h correction. If a re-fetched timestamp differs from the stored one in any way (TZ label, DST, second rounding), the fill **inserts a shifted duplicate** instead of filling the existing row.
    - Run `--check-pk-alignment` on a sample window from each era: pre-2026-05-31 bootstrap era, the repaired 2026-05-31…06-30 window, and post-2026-07 v3 era.
    - Proceed only where basal and requests match at ≥ 99.9% (bolus/requests are keyed by `bolus_id`, so they are inherently safer).
    - If an era misaligns, stop and escalate. Do not "fix" by deleting.
-5. **Window choice is an owner decision (§8 D2).** The options are full history across all 6 pumps or only the current pump. Older pumps were never validated against v3 field population. For example, `profileBasalRate` may be 0 or absent on old firmware. Run `--dry-run` on one early chunk per pump and inspect null rates before filling.
+5. **Window choice is an owner decision (§8 D2).** The options are the full history of every pump on the account, or only the current pump. Older pumps were never validated against v3 field population. For example, `profileBasalRate` may be 0 or absent on old firmware. Run `--dry-run` on one early chunk per pump and inspect null rates before filling.
 6. **Parquet / local shell.** There is no in-place fill by default. The documented path is `uv run python main.py fetch --clean`, a full re-pull that rebuilds every parquet at PIPELINE_VERSION 5. `doctor` and `version_guard` already warn when the sidecar is behind. The `fill_columns` parquet implementation from Task 7 exists for contract parity and for a possible future `fetch --fill-new-columns`, but wiring it into `main.py fetch` is **not** in scope.
 7. **`events.details` Tier 2 additions** are not fillable by COALESCE because `details` is non-null jsonb. They apply only to rows written after deploy, or after a parquet `fetch --clean`. M4 code must treat the keys as optional.
 
@@ -517,7 +542,7 @@ The nightly sync alone therefore populates new columns **only for rows first wri
    - (d) the existing nightly sync still succeeds. This is a no-op for it, because the old code's INSERT lists only the old columns.
 
    The migration is safe to apply **before** the code: every addition is nullable and additive.
-3. **Merge the code PR** (Tasks 1–9). The next nightly sync writes the new columns for new rows and starts filling `pump_iob`.
+3. **Merge the code PR** (Tasks 1–9, including 7a). The next nightly sync writes the new columns for new rows and starts filling `pump_iob`.
 4. **Watch one nightly cycle.** Check non-null rates on the last 24h of basal, requests and bolus, and the row count in `pump_iob`.
 5. **Run `--check-pk-alignment`** per era (§6.4).
 6. **Run the one-shot `--fill-new-columns` backfill** in chunks, newest first.
@@ -533,8 +558,8 @@ The nightly sync alone therefore populates new columns **only for rows first wri
 
 ## 8. Open decisions for the owner
 
-- **D1: Carb-ratio scale.** The observed `carbRatioRaw` is in the low thousands, and tconnectsync labels it "g/u". Confirm against the pump's programmed CR: is raw ÷ 1000 equal to g/U? This blocks Task 3. The fallback is to store it as `carb_ratio_raw integer` and defer interpretation.
-- **D2: Backfill extent.** Fill all 6 pumps' history, only the current pump, or only the last N months? Older-pump field population is unverified.
+- **D1: Carb-ratio scale.** The magnitude of `carbRatioRaw` suggests ×1000 fixed-point, although tconnectsync labels it "g/u". Confirm against the pump's programmed CR: is raw ÷ 1000 equal to g/U? This blocks Task 3. The fallback is to store it as `carb_ratio_raw integer` and defer interpretation.
+- **D2: Backfill extent.** Fill every pump's history, only the current pump, or only the last N months? Older-pump field population is unverified.
 - **D3: `bg_readings` table** (Tier 2): yes or no.
 - **D4: `pcm_change` details enrichment** (Tier 2): yes or no.
 - **D5: `pump_iob` naming and retention.** It is roughly 200 rows per day, about 73k per year, which is trivial. Confirm the name. Also decide whether `daily_total_basal` should become a daily rollup rather than a per-event column.
@@ -550,7 +575,7 @@ The nightly sync alone therefore populates new columns **only for rows first wri
 | Builders | Real-instance fixtures. Sentinel → NULL for every sentinel observed (65535 ×2, 0 ×3). Units (÷1000). Empty frames carry new columns. Orphan Msg2 → NULL ISF. Auto-correction keeps ISF. |
 | Contract (upstream) | `test_tconnectsync_field_contract.py` lists every newly-read attribute. |
 | Registry / converters | Arity match. Legacy frames without new columns convert to None instead of raising `KeyError`. Bootstrap covers the registry. |
-| Storage contract (all 3 backends) | `fill_columns` fills NULLs only, never overwrites, rejects PK columns; default unchanged. New-table round-trip. |
+| Storage contract (all 3 backends) | `fill_columns` fills NULLs only, never overwrites, and rejects PK columns. Sentinel NULLs are not counted, so a re-run reports 0. Duplicate PKs in a batch are deduped (keep-first) rather than raising. The default path is unchanged. New-table round-trip. |
 | Sync script | Flag wiring, explicit-window requirement, read-only PK-alignment report. |
 | Enrichment | `enrich_all` preserves new `requests` columns. |
 | Regression | Full `uv run pytest` (`-m legacy` unaffected). Web `tsc`/vitest/`next build` unchanged. |
@@ -564,6 +589,8 @@ The nightly sync alone therefore populates new columns **only for rows first wri
 |---|---|
 | **Sentinels leak as data**: 65535 → 65.535 U/hr phantom rate, ISF 0 → divide-by-zero in M4 | Explicit sentinel → NULL rules with named tests; column COMMENTs document the sentinel |
 | **Backfill inserts shifted duplicates** on timestamp-keyed `basal` after the TZ repair or v2/v3 decode differences | Mandatory `--check-pk-alignment` gate per era; stop if < 99.9% |
+| **`DO UPDATE` aborts on duplicate PKs in a batch** (CardinalityViolation). `DO NOTHING` used to tolerate these. | Task 7a dedupes each batch on PK (keep-first) before the fill upsert and logs the dropped count |
+| **Fill counters never reach zero** because sentinel NULLs keep matching an `IS NULL` guard | The guard requires a non-NULL incoming value (Task 7), and the null-rate completeness report (Task 8) measures how complete the backfill is |
 | **Parquet silently keeps NULLs** because keep-first dedup means old rows win | PIPELINE_VERSION bump, `doctor` warning, documented `fetch --clean` |
 | **Concurrent sync-script edits** (fail-loud branch) | Hard prerequisite: rebase after it merges; Task 8 is last in the sync-script path |
 | **tconnectsync drift** (field renames, as in the v2→v3 outage) | Contract test extended; pinned to 3.0.3 by the prerequisite branch |
