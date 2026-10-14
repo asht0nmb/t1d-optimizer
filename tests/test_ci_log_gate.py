@@ -219,7 +219,8 @@ inner()
     assert proc.returncode == 1
     lines = out_lines(proc)
     gate_lines = [l for l in lines if l.startswith("[gate] ValueError")]
-    assert gate_lines == ["[gate] ValueError: bad device <id> for <email>"]
+    assert gate_lines == ["[gate] ValueError (message suppressed; reproduce locally for details)"]
+    assert "bad device" not in proc.stdout.decode()
     text = proc.stdout.decode()
     assert "Traceback" not in text
     assert "inner()" not in text
@@ -235,7 +236,7 @@ except KeyError as e:
 """, tmp_path)
     lines = out_lines(proc)
     assert [l for l in lines if not l.startswith("[gate] suppressed")] == [
-        "[gate] RuntimeError: wrapped"
+        "[gate] RuntimeError (message suppressed; reproduce locally for details)"
     ]
 
 
@@ -248,17 +249,21 @@ except OSError:
 """, tmp_path)
     lines = out_lines(proc)
     assert any("__main__" in l and "sync failed" in l for l in lines)
-    assert "[gate] OSError: disk sad" in lines
+    assert "[gate] OSError (message suppressed; reproduce locally for details)" in lines
+    assert "disk sad" not in proc.stdout.decode()
     assert "Traceback" not in proc.stdout.decode()
 
 
-def test_truncated_traceback_at_eof_is_suppressed(tmp_path):
+def test_truncated_traceback_at_eof_reports_generic_line(tmp_path):
     proc = run_gate("""
 print("Traceback (most recent call last):")
 print('  File "x.py", line 1, in <module>')
 """, tmp_path)
     lines = out_lines(proc)
-    assert lines == ["[gate] suppressed 2 lines from non-allowlisted sources"]
+    assert lines == [
+        "[gate] traceback suppressed (unrecognised exception line; reproduce locally for details)",
+        "[gate] suppressed 2 lines from non-allowlisted sources",
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -347,3 +352,71 @@ logging.getLogger("ingestion.client").info("after crash")
     text = proc.stdout.decode()
     assert "after crash" not in text
     assert out_lines(proc) == ["[gate] internal error: RuntimeError; output suppressed"]
+
+
+def test_exception_message_never_printed_even_unmasked(tmp_path):
+    # Raised before login: nothing is registered or add-masked yet, so only
+    # default-deny protects the message. Only the type may appear.
+    proc = run_gate("""
+raise RuntimeError("boom for Arthur Dent serial 90123861")
+""", tmp_path)
+    text = proc.stdout.decode()
+    assert "Arthur" not in text and "90123861" not in text and "boom" not in text
+    assert "[gate] RuntimeError (message suppressed; reproduce locally for details)" in out_lines(proc)
+
+
+def test_dotted_exception_type_is_kept(tmp_path):
+    proc = run_gate("""
+import types
+mod = types.ModuleType("psycopg2")
+class OperationalError(Exception): pass
+OperationalError.__module__ = "psycopg2"
+raise OperationalError("could not connect to db.secret.supabase.co")
+""", tmp_path)
+    assert "[gate] psycopg2.OperationalError (message suppressed; reproduce locally for details)" in out_lines(proc)
+    assert "supabase" not in proc.stdout.decode()
+
+
+@pytest.mark.parametrize("intruder", ["Arthur: hello there", "Arthur", "SomeName: x"])
+def test_name_like_line_inside_traceback_is_not_treated_as_exception(intruder, tmp_path):
+    # An interleaved "Word: text" line must not be mistaken for the exception
+    # line, and must never print any of its text.
+    proc = run_gate(f"""
+print("Traceback (most recent call last):")
+print('  File "x.py", line 1, in <module>')
+print({intruder!r})
+print("ValueError: real one")
+""", tmp_path)
+    text = proc.stdout.decode()
+    word = intruder.split(":")[0]
+    assert word not in text
+    assert "hello" not in text
+
+
+def test_overlong_line_is_discarded_without_unbounded_buffering(tmp_path):
+    proc = run_gate(SYNC_PRELUDE + """
+sys.stdout.flush()
+sys.stdout.buffer.write(b"A" * (1024 * 1024))   # 1 MiB, no newline yet
+sys.stdout.buffer.write(b" 20:00:00 ingestion.client [INFO] tail\\n")
+sys.stdout.buffer.flush()
+logging.getLogger("ingestion.client").info("after long line")
+""", tmp_path)
+    assert proc.returncode == 0
+    lines = out_lines(proc)
+    assert any("after long line" in l for l in lines)
+    assert not any("tail" in l for l in lines)
+    assert "AAAA" not in proc.stdout.decode()
+    assert lines[-1] == "[gate] suppressed 1 lines from non-allowlisted sources"
+
+
+@pytest.mark.parametrize("length", [10_000, 70_000], ids=["over-pass-cap", "over-read-cap"])
+def test_overlong_allowlisted_line_is_discarded(length, tmp_path):
+    # Raw print (not logging) so the child's own redaction cost isn't measured.
+    proc = run_gate(SYNC_PRELUDE + f"""
+print("20:00:00 ingestion.client [INFO] " + "x" * {length}, flush=True)
+logging.getLogger("ingestion.client").info("short")
+""", tmp_path)
+    lines = out_lines(proc)
+    assert any(l.endswith("short") for l in lines)
+    assert all(len(l) < 70_000 for l in lines)
+    assert lines[-1] == "[gate] suppressed 1 lines from non-allowlisted sources"

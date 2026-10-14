@@ -42,8 +42,24 @@ serials and device UUIDs into those logs.
      - **`::add-mask::` lines.** These pass through byte for byte. The gate
        also registers the value with its own redactor, because the child's
        registered secrets live in a different process.
-     - **One `[gate] ExceptionType: <redacted message>` line per Python
-       traceback.**
+     - **One `[gate] ExceptionType (message suppressed; reproduce locally
+       for details)` line per Python traceback.**
+       - The exception message is never printed. Names and serials are only
+         add-masked in CI after login, so an exception raised earlier would
+         otherwise print them verbatim.
+       - A line only counts as the terminal exception line when it is inside
+         an active traceback and its last component is a dotted identifier
+         with an exception-like suffix, such as `Error`, `Exception`,
+         `Warning` or `Exit`.
+       - Anything else, such as an interleaved `Word: text` line or a
+         traceback cut off at EOF, produces a text-free
+         `[gate] traceback suppressed (...)` notice instead.
+   - Lines are bounded:
+     - The reader buffers at most 64 KB per line. Anything longer is
+       discarded whole and counted.
+     - Allowlisted lines over 8 KB are dropped rather than redacted, because
+       `redact()`'s email pattern is quadratic on long runs. Truncating
+       instead could split an identifier and defeat its pattern.
    - Everything else is dropped and counted, then reported at the end as
      `[gate] suppressed N lines from non-allowlisted sources`. That includes
      `tconnectsync.*`, `urllib3`, `py.warnings`, the root logger, bare
@@ -99,7 +115,7 @@ serials and device UUIDs into those logs.
 
 The public log no longer shows:
 
-- traceback frames (only the final exception line remains);
+- traceback frames and exception messages (only the exception type remains);
 - `tconnectsync` WARNING lines, such as HTTP errors and retries;
 - `urllib3` retry notices;
 - Python warnings;
@@ -131,7 +147,7 @@ scheduled jobs' logs out of public view are:
 
 ## Tests
 
-- `tests/test_ci_log_gate.py` has 43 tests. Every test runs the gate by file
+- `tests/test_ci_log_gate.py` has 51 tests. Every test runs the gate by file
   path, from a non-repo cwd, around a real child process. The log lines come
   from the real `configure_logging` and `basicConfig` calls in each
   entrypoint's format.
@@ -144,10 +160,13 @@ scheduled jobs' logs out of public view are:
   - `::add-mask::` passed through raw;
   - single and chained tracebacks collapsing to one line;
   - truncated tracebacks;
+  - exception messages never printed, even when unmasked;
+  - name-like lines inside a traceback not mistaken for exceptions;
+  - over-long lines (over 8 KB and over 64 KB) discarded;
   - exit codes 0, 1 and 2, and signal death;
   - binary garbage;
   - streaming before the child exits;
   - the suppressed-count summary;
   - fail-closed behaviour on an internal error and on an unlaunchable
     command.
-- Full suite: 1028 passed, 42 skipped, 48 deselected.
+- Full suite: 1036 passed, 42 skipped, 48 deselected.
