@@ -29,9 +29,10 @@ maxDeviation/minDeviation slope-tracking loop:
     Pinned commit: 8282ce71a57d09a160e92ecd2baf28a70c89694d (dev, fetched
                    2026-08-16)
 
-trio-oref's file-level license header applies (MIT — see
-``detection/iob.py``'s module docstring for the full text, not repeated
-here).
+License: Copyright (c) 2015-2019 OpenAPS Contributors. Distributed under the MIT
+License; the full copyright and permission notice from the pinned commit
+is reproduced in ``third_party/trio-oref/LICENSE.txt`` and applies to
+the ported portions of this module.
 
 THE CONCEPT (read this before the code)
 ----------------------------------------

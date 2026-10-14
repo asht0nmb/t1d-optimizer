@@ -26,19 +26,12 @@ algorithm family:
                    oref source as:
                    https://github.com/LoopKit/Loop/issues/388#issuecomment-317938473
 
-trio-oref's file-level license header (reproduced per the notes'
-attribution requirement):
+License (upstream ``calculate.js`` carries no file-level header):
 
-    Determine Basal
-    Released under MIT license. See the accompanying LICENSE.txt file for
-    full terms and conditions
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-    LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-    OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-    WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+    Copyright (c) 2015-2019 OpenAPS Contributors. Distributed under the MIT
+    License; the full copyright and permission notice from the pinned commit
+    is reproduced in ``third_party/trio-oref/LICENSE.txt`` and applies to
+    the ported portions of this module.
 
 The curve math (``tau``, ``a``, ``S``, ``activityContrib``, ``iobContrib``)
 is reproduced with the same variable names as the upstream JS so it can be
