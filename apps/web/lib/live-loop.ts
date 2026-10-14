@@ -59,32 +59,31 @@ export function formatLocal(iso: string, timezone: string): string {
   }
 }
 
-/** Today's (local-day) outcome counts as "no_candidate 140 · stale 3". */
+/**
+ * Most recent day's outcome counts as "2026-10-14: no_candidate 140 · stale 3".
+ *
+ * Day keys are the worker's (`config.timezone` in the cron worker), while the
+ * web timezone comes from `process.env.TZ` (default America/Los_Angeles); the
+ * two are configured separately and can differ. So we never recompute
+ * "today": we show the newest key as-is and label it with that date.
+ */
 export function formatOutcomeCounts(
   meta: Record<string, unknown> | null,
-  timezone: string,
-  nowIso: string,
 ): string | null {
   const counts = asRecord(meta?.outcome_counts);
   if (!counts) return null;
-  let dayKey: string;
-  try {
-    dayKey = new Intl.DateTimeFormat("sv-SE", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(new Date(nowIso));
-  } catch {
-    return null;
-  }
-  const today = asRecord(counts[dayKey]);
-  if (!today) return null;
-  const parts = Object.entries(today)
+  const day = Object.keys(counts)
+    .filter((k) => /^\d{4}-\d{2}-\d{2}$/.test(k))
+    .sort()
+    .pop();
+  if (!day) return null;
+  const perDay = asRecord(counts[day]);
+  if (!perDay) return null;
+  const parts = Object.entries(perDay)
     .filter(([, n]) => typeof n === "number" && Number.isFinite(n) && n > 0)
     .sort((a, b) => (b[1] as number) - (a[1] as number))
     .map(([k, n]) => `${k} ${n}`);
-  return parts.length > 0 ? parts.join(" · ") : null;
+  return parts.length > 0 ? `${day}: ${parts.join(" · ")}` : null;
 }
 
 export function buildLiveSignals(
@@ -110,12 +109,12 @@ export function buildLiveSignals(
   const outcome =
     typeof meta?.last_outcome === "string" ? meta.last_outcome : null;
   const ageMin = asFiniteNumber(meta?.last_reading_age_min);
-  const counts = formatOutcomeCounts(meta, timezone, nowIso);
+  const counts = formatOutcomeCounts(meta);
   const detail =
     [
       outcome ? `last: ${outcome}` : null,
       ageMin !== null ? `reading ${Math.round(ageMin)} min old` : null,
-      counts ? `today: ${counts}` : null,
+      counts ? `counts ${counts}` : null,
     ]
       .filter((p): p is string => p !== null)
       .join(" · ") || null;

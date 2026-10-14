@@ -35,3 +35,14 @@ write-up listed this web follow-up.
   rows track `last_synced_at` (worker row labelled legacy).
 - The "today" key uses the dashboard timezone; the worker keys counts by its
   configured local timezone. They match for this single-user setup.
+
+## Review follow-ups
+
+- Outcome-count day keys come from the worker (`config.timezone`), while the
+  web timezone is `process.env.TZ` (default America/Los_Angeles); they can
+  differ. The page now shows the newest worker day key as-is
+  (`counts 2026-10-14: ...`) instead of recomputing "today".
+- `classifyFreshness` now treats timestamps >5 min in the future as "stale"
+  (warning badge). To keep that from misfiring on naive local-time strings,
+  all freshness signals (CGM, detection, sync rows) classify the UTC ISO value
+  and only display the local text.

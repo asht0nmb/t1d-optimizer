@@ -15,6 +15,7 @@ const LIVE_CRON_SOURCE = "live_cron";
 
 interface RawCgmLatest {
   latest_ts: string | null;
+  latest_ts_utc: string | null;
 }
 
 interface RawFetchState {
@@ -28,6 +29,7 @@ interface RawFetchState {
 
 interface RawDetectionLatest {
   latest_created_at: string | null;
+  latest_created_at_utc: string | null;
 }
 
 interface RawAlertLatest {
@@ -40,7 +42,8 @@ export async function fetchStatus(
 ): Promise<StatusResponse> {
   const [cgmRows, fetchStateRows, detectionRows, alertRows] = await Promise.all([
     queryRows<RawCgmLatest>(
-      `SELECT (MAX(timestamp) AT TIME ZONE $1)::text AS latest_ts FROM cgm`,
+      `SELECT (MAX(timestamp) AT TIME ZONE $1)::text AS latest_ts,
+        to_char(MAX(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS latest_ts_utc FROM cgm`,
       [timezone],
     ),
     queryRows<RawFetchState>(
@@ -56,7 +59,8 @@ export async function fetchStatus(
       [timezone],
     ),
     queryRows<RawDetectionLatest>(
-      `SELECT (MAX(created_at) AT TIME ZONE $1)::text AS latest_created_at
+      `SELECT (MAX(created_at) AT TIME ZONE $1)::text AS latest_created_at,
+        to_char(MAX(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS latest_created_at_utc
        FROM detection_results`,
       [timezone],
     ),
@@ -78,7 +82,7 @@ export async function fetchStatus(
   signals.push({
     label: "CGM data",
     timestamp: latestCgm ? latestCgm.slice(0, 16) : null,
-    freshness: classifyFreshness(latestCgm, CGM_THRESHOLD_HOURS),
+    freshness: classifyFreshness(cgmRows[0]?.latest_ts_utc ?? null, CGM_THRESHOLD_HOURS),
     detail: null,
   });
 
@@ -103,7 +107,7 @@ export async function fetchStatus(
       signals.push({
         label: `Sync: ${row.source_id}`,
         timestamp: row.last_synced_at ? row.last_synced_at.slice(0, 16) : null,
-        freshness: classifyFreshness(row.last_synced_at, CGM_THRESHOLD_HOURS),
+        freshness: classifyFreshness(row.last_synced_at_utc, CGM_THRESHOLD_HOURS),
         detail: row.source_kind,
       });
     }
@@ -114,7 +118,7 @@ export async function fetchStatus(
   signals.push({
     label: "Last detection",
     timestamp: latestDetection ? latestDetection.slice(0, 16) : null,
-    freshness: classifyFreshness(latestDetection, DETECTION_THRESHOLD_HOURS),
+    freshness: classifyFreshness(detectionRows[0]?.latest_created_at_utc ?? null, DETECTION_THRESHOLD_HOURS),
     detail: null,
   });
 

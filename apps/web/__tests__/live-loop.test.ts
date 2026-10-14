@@ -71,7 +71,7 @@ describe("buildLiveSignals", () => {
     expect(cgm.detail).toContain("reading 1500 min old");
   });
 
-  it("all healthy, with today's outcome counts (local day)", () => {
+  it("all healthy, with newest day's outcome counts", () => {
     const { worker, cgm } = bySignal(
       row(4, {
         last_cycle_at: iso(1),
@@ -87,7 +87,7 @@ describe("buildLiveSignals", () => {
     expect(worker.timestamp).toBe("2026-10-14 12:59");
     expect(cgm.freshness).toBe("ok");
     expect(cgm.detail).toBe(
-      "last: no_candidate · reading 3 min old · today: no_candidate 140 · stale 3",
+      "last: no_candidate · reading 3 min old · counts 2026-10-14: no_candidate 140 · stale 3",
     );
   });
 
@@ -102,5 +102,19 @@ describe("buildLiveSignals", () => {
   it("15-minute boundary is inclusive", () => {
     expect(bySignal(row(15, {})).cgm.freshness).toBe("ok");
     expect(bySignal(row(16, {})).cgm.freshness).toBe("stale");
+  });
+
+  it("shows the worker's newest day key as-is, even if it differs from web 'today'", () => {
+    // Web tz (LA) says 2026-10-14; the worker keyed by a different tz.
+    const { cgm } = bySignal(
+      row(4, {
+        outcome_counts: {
+          "2026-10-13": { stale: 9 },
+          "2026-10-15": { no_candidate: 2 },
+          "not-a-day": { error: 1 },
+        },
+      }),
+    );
+    expect(cgm.detail).toBe("counts 2026-10-15: no_candidate 2");
   });
 });
