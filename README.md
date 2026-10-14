@@ -126,6 +126,22 @@ Ingestion turns the raw device feeds into nine normalized tables, and an enrichm
 
 The cloud deployment runs the dashboard on Next.js and Vercel, stores data in Supabase Postgres with auth, takes inbound Telegram commands through a webhook, drives the live loop with an external cron service hitting a Vercel function every five minutes, and syncs the pump nightly through a GitHub Actions workflow. 
 
+## Attribution
+
+`detection/iob.py` and `detection/deviation.py` port formulas from the
+[oref](https://github.com/openaps/oref0) artificial-pancreas algorithm
+family, specifically
+[nightscout/trio-oref](https://github.com/nightscout/trio-oref) (MIT
+License, commit `8282ce71a57d09a160e92ecd2baf28a70c89694d`): the
+exponential insulin-action curve from `lib/iob/calculate.js`
+(`iobCalcExponential`, itself citing
+[LoopKit/Loop#388](https://github.com/LoopKit/Loop/issues/388)) and the
+delta-normalization scheme from `lib/glucose-get-last.js`.
+`detection/episode_boundary.py` ports the deviation max/min slope-tracking
+loop from `lib/determine-basal/cob.js`. Each source file's docstring
+records the exact commit, license text, and what was/was not ported. See
+`docs/algorithm-research-findings.md` for the full research writeup.
+
 ## Notes
 
 The core has a large test suite, including a contract suite that every storage backend passes identically, so swapping parquet for Postgres or for the in-memory store changes nothing a caller can see. Detection is pure and deterministic, the clustering is seeded so results reproduce, a version guard refuses to read on-disk data against decode logic it no longer matches, and a `doctor` command reports the state of the pipeline at a glance. The local version can run all analyses and detection; however, it can be storage-intensive and cannot support live alerts. 
