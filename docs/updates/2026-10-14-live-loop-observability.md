@@ -5,7 +5,38 @@
 (`apps/personal/telegram/`). Detection logic, thresholds and existing
 `meal_rise` config values are untouched.
 
-## Why
+## HEADLINE FIX: Dexcom timestamps were shifted by the Share UTC offset
+
+`fetch_dexcom_cgm` did `r.datetime.replace(tzinfo=timezone.utc)`. pydexcom
+0.5.1 returns a tz-AWARE datetime built from the Share `DT` field
+(`Date(<epoch ms><+/-HHMM>)`): the epoch is the true UTC instant and the
+offset is only the display timezone (the live account is UTC-07:00).
+`.replace()` relabels the wall clock as UTC, shifting every reading 7 h into
+the past. Verified on live data: a reading truly 5.0 min old was computed as
+425.0 min old, so the 15-min freshness guard skipped EVERY cycle. This is why
+`detection_results` / `alerts_sent` have had zero rows since the loop started:
+the meal-rise alert has been unable to fire since about late May.
+
+Fix: `astimezone(timezone.utc)` for aware datetimes (naive still treated as
+UTC). Audit of the rest of the live path: `normalize_dexcom_readings`
+(`tz_convert` on aware timestamps), the `live_health` age computations and the
+`/status` reading age all operate on tz-aware values / ISO strings with
+offsets, so they were only wrong because of this one conversion. Regression
+tests (`tests/detection/test_live_path_dexcom_tz.py`) use REAL
+`pydexcom.GlucoseReading` objects with `DT` offsets -0700, -0400 and +0000 and
+assert the true instant, a correct reading age, a 120 -> 185 lunch rise firing
+end to end, and no false stale alert across 24 h of healthy data. (Without the
+fix, my own new stale-CGM alert would have fired falsely forever.)
+
+### PRODUCTION IMPACT of this fix: the live alert starts firing for the first time
+
+Once deployed, meal-rise alerts will reach Telegram for the first time. A
+historical replay estimates about **21 alerts/week (~3/day)**. Roughly **16%
+are pre-bolused false alarms**, and the live path does not check boluses.
+Threshold and volume tuning is the owner's call; **no thresholds were changed**
+in this PR. Expect the first alerts within hours of deploy.
+
+## Why (observability)
 
 The August audit (`2026-08-16-live-system-health-audit.md`) found that
 `detection_results` and `alerts_sent` had zero rows since the loop started
@@ -159,6 +190,7 @@ advanced and `last_outcome == "error"`.
 
 ## Watch after deploy
 
+0. **First real meal-rise alerts**: expect ~3/day (see headline); some will be pre-bolused false alarms.
 1. Telegram `/status` within ~10 min: "Live loop" shows a recent last cycle
    and an outcome other than `error`.
 2. `SELECT last_synced_at, meta FROM fetch_state WHERE source_id='live_cron'`

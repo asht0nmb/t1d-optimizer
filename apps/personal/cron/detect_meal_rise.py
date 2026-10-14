@@ -147,9 +147,16 @@ def fetch_dexcom_cgm(meal_rise_config: MealRiseConfig, tz_name: str) -> pd.DataF
     normalized = []
     tz = ZoneInfo(tz_name)
     for r in readings:
-        # r.datetime is typically in naive UTC from the pydexcom library
-        # Let's ensure tz-aware representation in America/Los_Angeles (or config tz)
-        dt_utc = r.datetime.replace(tzinfo=timezone.utc)
+        # pydexcom 0.5.x returns a tz-AWARE datetime built from the Share DT
+        # field: the epoch is the true UTC instant and the trailing offset is
+        # only the display timezone. Convert (astimezone) -- never relabel with
+        # .replace(tzinfo=utc), which shifts the instant by the offset and made
+        # every reading look hours stale. Naive values are treated as UTC.
+        raw_dt = r.datetime
+        if raw_dt.tzinfo is not None:
+            dt_utc = raw_dt.astimezone(timezone.utc)
+        else:
+            dt_utc = raw_dt.replace(tzinfo=timezone.utc)
         dt_local = dt_utc.astimezone(tz)
         normalized.append({
             "timestamp": dt_local,
