@@ -503,3 +503,138 @@ class TestLateCreatedLoggers:
         redaction.install_redaction()
         redaction.install_redaction()
         assert logging.getLogRecordFactory() is before
+
+
+# ---------------------------------------------------------------------------
+# Linear-time redaction: regex performance + exact behavioural equivalence
+# ---------------------------------------------------------------------------
+
+import re  # noqa: E402
+import time  # noqa: E402
+
+from hypothesis import given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+# The pre-fix patterns, kept here as test-only oracles. They are correct but
+# super-linear (each start position in a long run rescans to the run's end).
+_OLD_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+")
+_OLD_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*")
+
+_KB = 1024
+
+
+def _sized(unit: str, n_bytes: int) -> str:
+    return (unit * (n_bytes // len(unit) + 1))[:n_bytes]
+
+
+_REALISTIC_UNIT = (
+    "2026-10-14 03:12:45 tconnectsync.api [WARNING] Received ApiException with endpoint "
+    "'api/reports/bff/pump-logs/dev42?pumperId=abc123&startDate=2026-10-13' (tries 2): "
+    'HTTP 500 body={"error":"internal","detail":"upstream_timeout_retry_after_30s",'
+    '"trace":"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4"} '
+)
+
+# name -> repeating unit; each is a worst case for at least one pattern.
+_ADVERSARIAL = {
+    "email_chars_no_at": "a.b_c%d+e-f0",
+    "many_at_no_tld": "a@b",
+    "a_dot_runs": "a.a.",
+    "eyj_header_no_dots": "eyJ",
+    "bot_digit_runs": "bot1234567",
+    "realistic_log_line": _REALISTIC_UNIT,
+}
+
+
+def _best_of(fn, s: str, runs: int = 3) -> float:
+    best = float("inf")
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        fn(s)
+        best = min(best, time.perf_counter() - t0)
+    return best
+
+
+class TestRedactLinearTime:
+    """The old _EMAIL_RE / _JWT_TOKEN_RE took ~2.3 s on 64 KB and ~38 s on 256 KB.
+
+    A linear implementation does each case in a few ms. Bounds are generous
+    (CI runners are slow) but far below the quadratic behaviour.
+    """
+
+    @pytest.mark.parametrize("name", sorted(_ADVERSARIAL))
+    def test_64kb_under_50ms(self, name):
+        s = _sized(_ADVERSARIAL[name], 64 * _KB)
+        assert _best_of(redaction.redact, s) < 0.050
+
+    @pytest.mark.parametrize("name", sorted(_ADVERSARIAL))
+    def test_256kb_under_200ms(self, name):
+        s = _sized(_ADVERSARIAL[name], 256 * _KB)
+        assert _best_of(redaction.redact, s) < 0.200
+
+
+class TestEmailEdgeCases:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "first.last@example.com",  # whole line
+            "first.last@example.com trailing",  # line start
+            "leading first.last@example.com",  # line end
+            "a\nfirst.last@example.com\nb",  # next to newlines
+            "GET https://x.test/api?u=first.last@example.com&x=1",  # inside URL
+            "https://first.last@example.com/path",  # userinfo in URL
+            "mailto:first.last@example.com",
+            "first.last+tag@example.co.uk",  # plus-addressing
+            "<first_last%x-y@sub-domain.example.org>",
+        ],
+    )
+    def test_email_redacted(self, text):
+        out = redaction.redact(text)
+        assert "first" not in out and "@" not in out
+        assert "<email>" in out
+
+    def test_surrounding_text_preserved(self):
+        out = redaction.redact("GET https://x.test/api?u=first.last@example.com&x=1")
+        assert out == "GET https://x.test/api?u=<email>&x=1"
+
+    def test_back_to_back_emails_after_partial_domain(self):
+        # The first match ends at "c"; the old regex resumed mid-run at "_d".
+        assert redaction.redact("a@b.c_d@e.com") == "<email><email>"
+
+    def test_long_local_part_fully_redacted(self):
+        local = "x" * 300
+        assert redaction.redact(f"to {local}@example.com ok") == "to <email> ok"
+
+    def test_long_domain_fully_redacted(self):
+        domain = ".".join(["label" * 20] * 10) + ".com"
+        assert redaction.redact(f"to a@{domain} ok") == "to <email> ok"
+
+    def test_no_tld_untouched(self):
+        assert redaction.redact("user@localhost and a@b") == "user@localhost and a@b"
+
+
+class TestJwtEdgeCases:
+    def test_real_length_jwt_redacted(self):
+        payload = "eyJ" + "A" * 1500
+        tok = f"eyJhbGciOiJSUzI1NiJ9.{payload}.{'s' * 342}"
+        assert redaction.redact(f"Authorization: Bearer {tok}\n") == "Authorization: Bearer <jwt>\n"
+
+    def test_jwt_embedded_after_word_chars(self):
+        assert redaction.redact(f"xx{FAKE_JWT} y") == "xx<jwt> y"
+
+
+_EMAIL_ALPHABET = st.sampled_from(list("ab.-_+%@ \n") + ["eyJ", ".com", "x@y.z"])
+_JWT_ALPHABET = st.sampled_from(list("ab.-_ =") + ["eyJ", "eyJa.", ".b."])
+
+
+class TestEquivalenceWithOldPatterns:
+    """New substitutions must be byte-identical to the old regexes."""
+
+    @settings(max_examples=2000, deadline=None)
+    @given(st.lists(_EMAIL_ALPHABET, max_size=40).map("".join))
+    def test_email_matches_old(self, s):
+        assert redaction._redact_emails(s) == _OLD_EMAIL_RE.sub("<email>", s)
+
+    @settings(max_examples=2000, deadline=None)
+    @given(st.lists(_JWT_ALPHABET, max_size=40).map("".join))
+    def test_jwt_matches_old(self, s):
+        assert redaction._redact_jwts(s) == _OLD_JWT_RE.sub("<jwt>", s)
