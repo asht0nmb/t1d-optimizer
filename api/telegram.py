@@ -41,6 +41,7 @@ def handle_telegram_request(
         send_telegram_message,
     )
     from apps.personal.telegram.handler import process_webhook
+    from apps.personal.telegram.llm_assistant import build_client, config_from_env
     from detection.config import get_config
 
     try:
@@ -57,6 +58,16 @@ def handle_telegram_request(
             return False
         return send_telegram_message(bot_token, chat_id, text)
 
+    # LLM assistant (research/2026-08-16 exploration branch): inert by
+    # construction. config_from_env() returns None unless BOTH
+    # LLM_ASSISTANT_ENABLED=true AND ANTHROPIC_API_KEY are set — neither is
+    # configured in this deploy today, so build_client(...) returns None
+    # and process_webhook runs exactly as it did before this feature
+    # existed. See apps/personal/telegram/llm_assistant.py's module
+    # docstring for the full design and docs/ml-notes/llm-assistant.md for
+    # how to enable it once a real key is wired.
+    llm_client = build_client(config_from_env())
+
     # Pass the connection factory, not an open connection: process_webhook
     # only calls it after the secret + chat-allowlist checks pass, so
     # unauthenticated traffic never opens a pooler connection. It also
@@ -67,6 +78,7 @@ def handle_telegram_request(
         storage_factory=get_storage_connection,
         config=config,
         send=_send,
+        llm_client=llm_client,
     )
 
 

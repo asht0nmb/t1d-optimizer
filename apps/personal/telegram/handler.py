@@ -1,11 +1,21 @@
 """Webhook orchestration for the Telegram command surface.
 
 Flow: verify secret header → parse update → enforce chat allowlist →
-read storage → build a deterministic digest → send via Telegram. No LLM.
+read storage → build a deterministic digest → send via Telegram.
 
 The pure pieces (auth check, dispatch over an injected ``Storage``) are
 unit-testable without network; the Vercel entrypoint in ``api/telegram.py``
 wires in the real storage and the real ``send`` function.
+
+LLM assistant (research/2026-08-16 exploration branch, code-complete but
+UNWIRED): ``build_reply``/``process_webhook`` both take an optional
+``llm_client`` parameter, defaulted to ``None``. When ``None`` (every
+deploy today — no ``ANTHROPIC_API_KEY`` is configured anywhere), free-text
+input still falls through to ``help_text()`` exactly as before this
+parameter existed. Only when a caller explicitly passes a configured
+``LLMClient`` (see ``apps/personal/telegram/llm_assistant.py`` for why
+that's inert-by-default even in ``api/telegram.py``) does non-command text
+route to the conversational assistant instead.
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ from apps.personal.telegram.digest import (
     build_trends_digest,
     help_text,
 )
+from apps.personal.telegram.llm_assistant import LLMClient, answer_query, build_context
 from core.storage.protocol import Storage
 from detection.config import AppConfig
 
@@ -171,14 +182,38 @@ def _status_reply(*, storage: Storage, now: datetime) -> str:
     )
 
 
+def _llm_reply(parsed: ParsedCommand, *, storage: Storage, config: AppConfig, now: datetime, llm_client: LLMClient) -> str:
+    """Route free-text (non-command) input to the LLM assistant.
+
+    Never lets an LLM-path failure crash the webhook — a network error, a
+    missing/invalid API key, or a malformed response from the model all
+    fall back to `help_text()` rather than surfacing an exception to the
+    Telegram chat or (worse) to `process_webhook`'s generic 200/internal-
+    error path. See `apps/personal/telegram/llm_assistant.py`'s module
+    docstring for the context-assembly and Protocol design this calls into.
+    """
+    try:
+        context = build_context(storage=storage, config=config, now=now)
+        return answer_query(parsed.raw_text or "", context=context, client=llm_client)
+    except Exception:
+        logger.warning("telegram: LLM assistant path failed; falling back to help", exc_info=True)
+        return help_text()
+
+
 def build_reply(
     parsed: ParsedCommand,
     *,
     storage: Storage,
     config: AppConfig,
     now: datetime,
+    llm_client: LLMClient | None = None,
 ) -> str:
-    """Map a known command to its reply text. Unknown → help."""
+    """Map a known command to its reply text.
+
+    Unknown/free-text input → the LLM assistant when `llm_client` is
+    provided (research branch, inert by default — see module docstring);
+    otherwise → `help_text()`, exactly as before that feature existed.
+    """
     tz = ZoneInfo(config.timezone)
     today = now.astimezone(tz).date()
     if parsed.command == "today":
@@ -192,6 +227,18 @@ def build_reply(
         return _trends_reply(storage=storage, config=config, tz=tz, now=now)
     if parsed.command == "status":
         return _status_reply(storage=storage, now=now)
+
+    # parsed.command is None here: either no text, an unrecognized
+    # /command (still help — we never treat a typo'd command as a
+    # conversational question), or genuine free text. Only the last case,
+    # with an LLM client actually configured, goes to the assistant.
+    is_free_text = (
+        parsed.raw_text is not None
+        and parsed.raw_text.strip() != ""
+        and not parsed.raw_text.strip().startswith("/")
+    )
+    if is_free_text and llm_client is not None:
+        return _llm_reply(parsed, storage=storage, config=config, now=now, llm_client=llm_client)
     return help_text()
 
 
@@ -203,6 +250,7 @@ def process_webhook(
     config: AppConfig,
     send: Callable[[str, str], bool],
     now: datetime | None = None,
+    llm_client: LLMClient | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Full request handling. Returns ``(http_status, json_body)``.
 
@@ -211,6 +259,11 @@ def process_webhook(
     ``storage_factory`` is called, so unauthenticated traffic never opens
     a database connection. The factory's result is closed (if it exposes
     ``close``) before returning.
+
+    ``llm_client``: optional, defaults to ``None`` (research branch,
+    inert by default — see module docstring and
+    ``apps/personal/telegram/llm_assistant.py``). Passed straight through
+    to ``build_reply``.
     """
     expected_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
     if not verify_secret(headers, expected_secret):
@@ -225,7 +278,9 @@ def process_webhook(
     now = now or datetime.now(ZoneInfo(config.timezone))
     storage = storage_factory()
     try:
-        reply = build_reply(parsed, storage=storage, config=config, now=now)
+        reply = build_reply(
+            parsed, storage=storage, config=config, now=now, llm_client=llm_client
+        )
     except Exception:  # never leak internals to the chat
         logger.exception("telegram command failed")
         return 200, {"ok": False, "replied": False, "error": "internal"}

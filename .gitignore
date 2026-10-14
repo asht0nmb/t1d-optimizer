@@ -33,6 +33,7 @@ data/models/
 *.parquet
 *.h5
 *.hdf5
+*.pkl
 
 # OS
 .DS_Store
