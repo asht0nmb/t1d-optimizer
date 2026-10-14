@@ -1,5 +1,7 @@
 # Clustering daily glucose/insulin patterns — a learning write-up
 
+> **Errata:** see [ERRATA-2026-10-14.md](ERRATA-2026-10-14.md) for review corrections to this note (original text unchanged).
+
 **Status:** exploratory, branch `research/ml-clustering-and-models`, not merged. Code lives in `detection/clustering.py`; the loader is `scripts/build_daily_features_dataset.py`. Read those files' docstrings alongside this — the code has the same explanations inline, this file walks through the *process* and the *real numbers* from running it against the owner's own data.
 
 ## The question

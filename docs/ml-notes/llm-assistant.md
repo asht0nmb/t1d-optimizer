@@ -1,5 +1,7 @@
 # LLM Telegram cause-attribution assistant — design notes and manual testing
 
+> **Errata:** see [ERRATA-2026-10-14.md](ERRATA-2026-10-14.md) for review corrections to this note (original text unchanged).
+
 **Status:** exploratory, branch `research/ml-clustering-and-models`, not merged, **not deployed, no live API key configured anywhere**. Code-complete and locally testable via a mock client; this doc is both the design write-up and the manual testing procedure. Code: `apps/personal/telegram/llm_assistant.py` (new module), plus small additive changes to `apps/personal/telegram/commands.py`, `apps/personal/telegram/handler.py`, and `api/telegram.py` (all backward-compatible — see "How this stays inert" below).
 
 ## The gap this fills

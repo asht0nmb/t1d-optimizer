@@ -1,5 +1,7 @@
 # Supervised modeling on the M2 meal-rise corpus — a learning write-up
 
+> **Errata:** see [ERRATA-2026-10-14.md](ERRATA-2026-10-14.md) for review corrections to this note (original text unchanged).
+
 **Status:** exploratory, branch `research/ml-clustering-and-models`, not merged. Code lives in `detection/supervised.py`; the corpus builder is `scripts/build_meal_rise_corpus.py`; the trainer/report is `scripts/train_meal_rise_classifier.py`. Advisory only, same posture as the existing `scripts/score_meal_rise.py` — nothing here edits `config/user_config.yaml` or the live meal-rise loop.
 
 ## The question, and why it's different from clustering
