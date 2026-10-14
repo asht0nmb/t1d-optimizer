@@ -3,7 +3,7 @@ import { createSessionClient } from "@/lib/supabase/server";
 /**
  * Session guard for data API routes.
  *
- * The middleware intentionally bypasses /api/* (the cron health route uses
+ * The proxy (proxy.ts, formerly middleware.ts) intentionally bypasses /api/* (the cron health route uses
  * bearer-token auth instead of cookies), and the data routes query with
  * service-role / direct-pg credentials that bypass RLS — so without this
  * guard every JSON endpoint would be publicly readable. Each data route

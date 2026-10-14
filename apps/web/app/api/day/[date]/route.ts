@@ -7,11 +7,11 @@ import { requireSession } from "@/lib/api/auth";
 
 export async function GET(
   _req: Request,
-  { params }: { params: { date: string } },
+  { params }: { params: Promise<{ date: string }> },
 ) {
   const denied = await requireSession();
   if (denied) return denied;
-  const date = coerceDateParam(params.date);
+  const date = coerceDateParam((await params).date);
   if (!date) {
     return jsonError("Invalid date; use YYYY-MM-DD", 400);
   }

@@ -9,7 +9,7 @@ export function hasSupabaseMiddlewareEnv(): boolean {
 }
 
 export async function updateSession(request: NextRequest) {
-  // Fail open when env is misconfigured so middleware does not crash all routes.
+  // Fail open when env is misconfigured so the proxy does not crash all routes.
   if (!hasSupabaseMiddlewareEnv()) {
     return NextResponse.next({ request });
   }
