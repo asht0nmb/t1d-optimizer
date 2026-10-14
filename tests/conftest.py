@@ -1,8 +1,20 @@
 """Shared pytest fixtures."""
 
+import logging
+
 import pytest
 
 from detection.config import get_config, load_config
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_globals():
+    """ingestion.redaction installs a process-wide LogRecordFactory and enables
+    warnings capture; undo both so they never leak between tests."""
+    factory = logging.getLogRecordFactory()
+    yield
+    logging.setLogRecordFactory(factory)
+    logging.captureWarnings(False)
 
 
 @pytest.fixture

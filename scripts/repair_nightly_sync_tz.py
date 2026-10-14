@@ -19,7 +19,7 @@ UTC-7, EDT is UTC-4). No pump clock-change events in the window, so this is
 a labeling bug, not a real timezone relocation.
 
 This script corrects every affected timestamp column by adding 3 hours,
-scoped to pump_serial='…3861' (the only pump active in this window) and
+scoped to a single pump serial passed via --serial (the only pump active in this window) and
 the empirically-verified boundary. It is provably PK-safe: a uniform shift
 preserves distinctness among corrupted rows (no internal collision), and
 shifted rows land strictly after BOUNDARY_UTC so they cannot collide with
@@ -28,9 +28,11 @@ synced post-outage data (>= 2026-07-01) is benign -- it would mean a
 corrected row's true timestamp coincides with a freshly-fetched row for the
 same real event, and ON CONFLICT DO NOTHING makes that idempotent.
 
-Usage:
-    uv run python scripts/repair_nightly_sync_tz.py            # dry run
-    uv run python scripts/repair_nightly_sync_tz.py --apply    # execute
+Usage (the pump serial is required and is deliberately NOT stored in source;
+pass the full serial exactly as stored in the pump_serial column, or set the
+REPAIR_PUMP_SERIAL env var):
+    uv run python scripts/repair_nightly_sync_tz.py --serial <SERIAL>          # dry run
+    uv run python scripts/repair_nightly_sync_tz.py --serial <SERIAL> --apply  # execute
 
 Already applied in production as of 2026-08-16 (verified: bolus_id 1868 and
 several other spot-checks across bolus/basal/cgm_gaps in June match a fresh
@@ -54,8 +56,6 @@ import psycopg2
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
-
-PUMP_SERIAL = "…3861"
 
 # Empirically verified: bolus_id 1867 (stored 2026-05-31 17:55:57 UTC) is the
 # last correct row; bolus_id 1868 (stored 2026-05-31 18:07:32 UTC) and cgm
@@ -111,11 +111,11 @@ _SENTINEL_BOLUS_ID = 1868
 _SENTINEL_CORRECTED_UTC = "2026-05-31 21:07:32+00"
 
 
-def _already_applied(conn) -> bool:
+def _already_applied(conn, serial: str) -> bool:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT timestamp FROM bolus WHERE pump_serial = %s AND bolus_id = %s",
-            (PUMP_SERIAL, _SENTINEL_BOLUS_ID),
+            (serial, _SENTINEL_BOLUS_ID),
         )
         row = cur.fetchone()
     if row is None:
@@ -123,7 +123,7 @@ def _already_applied(conn) -> bool:
     return str(row[0]) >= _SENTINEL_CORRECTED_UTC
 
 
-def repair(conn, *, apply: bool) -> dict[str, int]:
+def repair(conn, *, apply: bool, serial: str) -> dict[str, int]:
     """Return {table: rows_matched}. Only commits if apply=True."""
     results: dict[str, int] = {}
     with conn.cursor() as cur:
@@ -131,7 +131,7 @@ def repair(conn, *, apply: bool) -> dict[str, int]:
             cur.execute(
                 f"SELECT count(*) FROM {table} "
                 f"WHERE pump_serial = %s AND {boundary_col} >= %s AND {boundary_col} < %s",
-                (PUMP_SERIAL, BOUNDARY_UTC, CUTOFF_UTC),
+                (serial, BOUNDARY_UTC, CUTOFF_UTC),
             )
             (matched,) = cur.fetchone()
             results[table] = matched
@@ -146,7 +146,7 @@ def repair(conn, *, apply: bool) -> dict[str, int]:
                 cur.execute(
                     f"UPDATE {table} SET {hop1} "
                     f"WHERE pump_serial = %s AND {boundary_col} >= %s AND {boundary_col} < %s",
-                    (PUMP_SERIAL, BOUNDARY_UTC, CUTOFF_UTC),
+                    (serial, BOUNDARY_UTC, CUTOFF_UTC),
                 )
                 hop1_n = cur.rowcount
                 # Hop 2: from the disjoint range to the final correct value.
@@ -162,7 +162,7 @@ def repair(conn, *, apply: bool) -> dict[str, int]:
                     f"UPDATE {table} SET {hop2} "
                     f"WHERE pump_serial = %s AND {boundary_col} >= {shifted_lo} "
                     f"AND {boundary_col} < {shifted_hi}",
-                    (PUMP_SERIAL,),
+                    (serial,),
                 )
                 logger.info("%s: updated %d row(s) (two-hop, PK includes timestamp)", table, cur.rowcount)
                 if cur.rowcount != hop1_n:
@@ -177,19 +177,33 @@ def repair(conn, *, apply: bool) -> dict[str, int]:
                 cur.execute(
                     f"UPDATE {table} SET {set_clause} "
                     f"WHERE pump_serial = %s AND {boundary_col} >= %s AND {boundary_col} < %s",
-                    (PUMP_SERIAL, BOUNDARY_UTC, CUTOFF_UTC),
+                    (serial, BOUNDARY_UTC, CUTOFF_UTC),
                 )
                 logger.info("%s: updated %d row(s)", table, cur.rowcount)
     return results
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI args. Fails (exit 2) before any DB connection if no serial."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--apply", action="store_true",
         help="Execute the correction. Without this flag, only previews row counts.",
     )
+    parser.add_argument(
+        "--serial",
+        default=os.environ.get("REPAIR_PUMP_SERIAL"),
+        help="Full pump serial as stored in pump_serial (or set REPAIR_PUMP_SERIAL). "
+        "Never hardcoded in source.",
+    )
     args = parser.parse_args(argv)
+    if not args.serial:
+        parser.error("--serial (or REPAIR_PUMP_SERIAL) is required")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv()
@@ -198,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     conn = psycopg2.connect(db_url)
     conn.autocommit = False
 
-    if args.apply and _already_applied(conn):
+    if args.apply and _already_applied(conn, args.serial):
         logger.error(
             "Sentinel row (bolus_id=%s) already shows the corrected value -- "
             "this repair has already been applied. Refusing to run --apply "
@@ -209,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        results = repair(conn, apply=args.apply)
+        results = repair(conn, apply=args.apply, serial=args.serial)
         total = sum(results.values())
         if args.apply:
             conn.commit()
