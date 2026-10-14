@@ -1,6 +1,6 @@
 # 2026-10-14 M1 live-path diagnostic: why has the meal-rise alert never fired?
 
-Status: **advisory analysis. No detection logic, thresholds, config, or live-path code was changed.** A real bug candidate was found and is reported below with a failing (xfail-pinned) test and a proposed fix; fixing it is for the owner of `apps/personal/cron/`.
+Status: **advisory analysis. This PR changes no detection logic, thresholds, config, or live-path code.** It found the root cause of the zero-alerts result: a Share `DT`-offset timestamp bug in `fetch_dexcom_cgm`. **Update (same day): the bug is confirmed on live data** (a reading truly 5.0 min old was computed as 425.0 min old, account offset -0700) and the fix ships in PR #15 (`fix/live-loop-observability`); this PR is based on that branch and its offset tests now run as plain passing tests.
 
 ## 1. The question
 
@@ -14,8 +14,8 @@ The live missed-meal ("meal-rise") Telegram alert has been invoked every 5 minut
 ## 2. TL;DR
 
 * **(d) and (c) are effectively ruled out.** Replaying the real detector over 7.5 months of pump CGM as if live, with every gate and the refractory window, yields about **21 alerts/week** (147 alerts across the 6.7 weeks from 2026-07-01 to 2026-08-16 in which the live loop was running). The gates are not suppressing everything (about 1.3% of fresh 5-min ticks produce an alert), and qualifying rises are abundant (the live detector never looks at boluses, it fires on any sustained fast rise).
-* **"Zero ever" is therefore a data-path failure, not a detection outcome.** About 22 alerts/week x about 15 weeks (2026-07-01 to today) is on the order of **330 expected alerts versus 0 observed**. That requires the loop to have almost never evaluated a usable window. Which of the remaining causes did it is **undetermined**: (a, persistent) the Share feed was effectively never fresh for 100+ days (the owner confirms the G7 phone app was disconnected for an unknown period), or (b) a bug stopped a fresh feed from being recognised as fresh (including a silent missing-Telegram-config path). The one direct measurement we have (the August audit's 240 min stale) argues *against* the timestamp bug below for a Pacific-time account, so the current lean is (a), with (b) not excluded. Section 8 contains the checks that settle it.
-* **A real, deterministic correctness bug exists in the feed-parsing step** (`apps/personal/cron/detect_meal_rise.py:163`): it relabels a timezone-aware pydexcom datetime as UTC, which shifts every reading by the Share `DT` offset. With the production pin (`pydexcom==0.5.1`), any account whose `DT` offset is non-zero has every cycle skipped by the freshness guard. It is pinned by strict-xfail tests and should be fixed regardless, but it is **not shown** to be the cause of the zero (section 5).
+* **"Zero ever" is therefore a data-path failure, not a detection outcome.** About 22 alerts/week x about 15 weeks (2026-07-01 to today) is on the order of **330 expected alerts versus 0 observed**. That requires the loop to have almost never evaluated a usable window. **Classification: (b), a bug, confirmed.** The timestamp bug below blocked every cycle since late May; the disconnected G7 phone app (a) contributed recently but is not what produced the zero. (My original analysis, before the live check, left (a) versus (b) undetermined; sections 5 and 7 are updated with the confirmation.)
+* **The bug** (`apps/personal/cron/detect_meal_rise.py:163` on `main`): it relabels a timezone-aware pydexcom datetime as UTC, which shifts every reading by the Share `DT` offset. With the production pin (`pydexcom==0.5.1`) and this account's -0700 offset, every cycle's newest reading looked at least 420 min old and the freshness guard skipped it. **Live reproduction: a reading truly 5.0 min old was computed as 425.0 min old.**
 * Existing tests could not have caught it: the fake Dexcom reading hands the cron an already-UTC datetime and never touches pydexcom's real parser.
 
 ## 3. The live path, end to end (every gate between a fresh reading and an alert)
@@ -63,7 +63,7 @@ Scenario: unbolused lunch rise, 120 -> 185 mg/dL over 30 min (about 2.17 mg/dL/m
 **Results**
 
 * With `DT` offset `+0000`: **fires**. One Telegram POST to the right URL/chat id, one `detection_results` row (`telegram_sent: true`), one `alerts_sent` claim, heartbeat written, local hour 12, multiplier 0.7. So gates 3-17 work end to end.
-* With `DT` offset `-0400`, `-0700`, `-0800`: **does not fire** (0 posts, 0 rows). Pinned as `xfail(strict=True)` (the suite stays green and flips to a failure the moment the bug is fixed). Cause: section 5.
+* With `DT` offset `-0400`, `-0700`, `-0800`: **does not fire** (0 posts, 0 rows). This was originally pinned as `xfail(strict=True)`; with the fix from PR #15 in this branch's base the markers are removed and these cases are ordinary passing tests (they fail on `main`). Cause: section 5.
 * Gate pins via the real path (offset `+0000` so the bug cannot interfere): same ramp at 03:00 local does **not** fire (2.17 < 2.34), a 1.3x steeper one does; freshness boundary (14 min fires, 16 and 240 do not); coverage (5 of 7 fires, 4 of 7 blocked); start-level bounds (250 fires, 251 and 69 do not); refractory (second qualifying cycle sends nothing); Telegram outage still claims + records; **missing Telegram env => `run_cron` returns 1, both tables stay empty, heartbeat still written** (the second silent-zero path).
 
 **Do existing tests cover this?** Partly. `tests/detection/test_cron_meal_rise.py::test_cron_sharp_rise_breakfast_triggers_alert` runs `run_cron` with an in-memory store and a patched sender, so the downstream half is covered. But its `MockGlucoseReading` carries a hand-built UTC datetime ("pydexcom datetimes are standard naive UTC datetime" in its docstring, which is no longer true for 0.5.1), so it bypasses exactly the step that is broken; it patches `send_telegram_message` rather than the HTTP layer; and it only tests a 100 -> 150 rise inside a meal window. The new file closes those gaps.
@@ -90,9 +90,9 @@ Consequences for any non-zero offset: (1) every fresh reading looks at least `|o
 
 The code comment ("r.datetime is typically in naive UTC") describes pydexcom < 0.5 behaviour.
 
-**Failing test:** `tests/detection/test_meal_rise_live_path_e2e.py` -> `test_unbolused_lunch_rise_fires_end_to_end[dt_offset_-0700_PDT]` and `test_fetch_dexcom_cgm_preserves_the_true_instant[...]` (all `xfail(strict=True)`; run `uv run pytest tests/detection/test_meal_rise_live_path_e2e.py --runxfail` to see them fail).
+**Regression tests:** `tests/detection/test_meal_rise_live_path_e2e.py` -> `test_unbolused_lunch_rise_fires_end_to_end[dt_offset_-0700_PDT]` and `test_fetch_dexcom_cgm_preserves_the_true_instant[...]`. They fail on `main` (as strict xfails in the first revision of this PR) and pass once the fix from PR #15 is applied.
 
-**Proposed fix** (not applied; verified locally by temporarily applying it: all 22 new tests pass with `--runxfail`, and the existing 18 `test_cron_meal_rise.py` tests still pass; change reverted):
+**Fix** (shipped in PR #15, not in this PR; I had verified the same change locally by temporarily applying it):
 
 ```python
 dt = r.datetime
@@ -100,14 +100,10 @@ dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezon
 dt_local = dt_utc.astimezone(tz)
 ```
 
-Then delete the `OFFSET_BUG` markers from the new test file.
 
-**Confidence, honestly stated.** The mechanism is certain (reproduced above with the real parser), and both ingredients were in place during the August audit: the `.replace(tzinfo=utc)` line dates from 2026-05-25/28 (`9c2709d`, `54baf19`), `pydexcom 0.5.1` was locked on 2026-05-25 and pinned in the worker requirements by 2026-06-20. What is *not* known is the `DT` offset this particular Share account reports, and the one direct measurement cuts against the bug being the cause:
+**Confirmation on live data (added after the first revision of this analysis).** The coordinator ran the real fetch path against the live Share feed: a reading that was truly **5.0 min old was computed as 425.0 min old**, i.e. the account's `DT` offset is **-0700** and the bug adds exactly 420 min. Both ingredients have been in production since late May: the `.replace(tzinfo=utc)` line dates from 2026-05-25/28 (`9c2709d`, `54baf19`), `pydexcom 0.5.1` was locked on 2026-05-25 and pinned in the worker requirements by 2026-06-20. Since the minimum apparent age is 420 min against a 15-min limit, the freshness guard skipped **every** cycle, which fully explains zero rows ever.
 
-* For a Pacific account the offset is -0700 (PDT) or -0800 (PST), so with the bug active no reading could ever look younger than **420-480 min**. The audit measured **240 min**. That is impossible with the bug active at a Pacific offset. It fits (i) a `DT` offset of `+0000` (bug latent for this account; 240 min is then a genuinely stale feed, consistent with the disconnected phone) or (ii) a -0400 offset (unlikely for a Pacific phone, though the account/server timezone is not necessarily the phone's).
-* The audit's round "240 (4 hours)" is weak evidence by itself (the write-up may have rounded), so I do not lean on it.
-
-So: the bug is real and worth fixing for any non-zero-offset account, but on current evidence it is an *unconfirmed* cause of the zero, not the likely one.
+One loose end: the August audit reported 240 min stale. With a -0700 offset the bug alone cannot produce less than 420, so that figure is not explained by this bug (the audit's measurement path or timing differed); it does not change the conclusion, since the live reproduction is direct. The disconnected G7 phone app (a) did add genuine staleness recently, but the bug alone blocked every cycle, with or without it. My earlier reasoning that the 240 reading argued against the bug at a Pacific offset was sound arithmetic applied to a number that turned out not to be comparable.
 
 
 ## 6. Historical replay (Task 3)
@@ -179,19 +175,17 @@ How to read this: "uncovered" means *no food bolus was logged*, not *the user at
 |---|---|---|
 | (d) no qualifying events | **Ruled out** | 147 would-be alerts in the live window (about 22/week), about 77% with no food bolus nearby. Zero is not a believable outcome of the detector's own definition. |
 | (c) gates suppress everything | **Ruled out** | Same replay: gates pass about 7% of fresh ticks and alert on about 1.4%. Slope is the dominant gate (about 78% of rejections), start-level above 250 next (about 10-12%), both reasonable. Nothing in the gates is close to "always false". |
-| (a) Share rarely fresh | **Leading, but only in an extreme persistent form** | Under an IID model with 147 independent events, `P(zero alerts | fraction f of events seen) = (1-f)^147`: f = 5% -> 0.05%; f = 2% -> 5%; f = 1% -> 23%. Staleness comes in bursts, which loosens the IID assumption, but expected alerts are still about f x N regardless: about 330 expected since 2026-07-01 means f must be near zero. Because a rise stays detectable for about 20 min, short outages cannot explain it. The feed must have been essentially never fresh for 100+ days. The owner's report that the G7 phone app was disconnected for an unknown period fits this *if* it spans most of the period, and the audit's 240-min reading shows the feed really was stale on 2026-08-16. |
-| (b) bug | **Not excluded; undetermined** | `:163` makes a fresh feed look hours old for any non-zero `DT` offset, but the audit's 240-min measurement is impossible with that bug active at a Pacific offset (minimum 420-480 min), so it is only live if the account's `DT` offset is about -0400. Second silent path: `failed_config` (missing `TELEGRAM_*` env on the worker project) returns before any write while the heartbeat stays healthy; not visible from the database. |
+| (a) Share rarely fresh | **Contributed recently; not the root cause** | Under an IID model with 147 independent events, `P(zero alerts | fraction f seen) = (1-f)^147`: f = 5% -> 0.05%; f = 2% -> 5%. About 330 expected since 2026-07-01 means the loop evaluated almost nothing, which a stale feed alone would need to be persistent for 100+ days to explain. The disconnected G7 phone app added genuine staleness recently, but the bug below blocked every cycle regardless. |
+| (b) bug | **CONFIRMED** | `:163` made a fresh feed look at least 420 min old at this account's -0700 `DT` offset. Live reproduction: truly 5.0 min old computed as 425.0 min old. Present since late May, so the freshness guard skipped every cycle. A second silent path also exists: `failed_config` (missing `TELEGRAM_*` env) returns before any write while the heartbeat stays healthy. |
 
-**Classification of "zero ever": not (c) or (d). A data-path failure: (a, persistent) or (b), undetermined; the evidence we have leans (a).** Both are *invisible* in today's telemetry because the heartbeat is written on every non-raising cycle, including skipped ones. Section 8 decides it.
+**Classification of "zero ever": (b), a bug, confirmed; (c) and (d) ruled out; (a) a secondary, recent contributor.** The failure was invisible in telemetry because the heartbeat is written on every non-raising cycle, including skipped ones; per-cycle outcome logging (PR #15) closes that gap.
 
-## 8. How to resolve it today (owner-run; I did not call Dexcom or Telegram)
+## 8. Verifying the fix once deployed (owner-run; I did not call Dexcom or Telegram)
 
-The phone app was reconnected today, so the feed should now be fresh. The first two checks decide (a) versus (b):
+After PR #15 (with the `astimezone` fix) is deployed and the phone app is connected:
 
-1. Vercel logs of the cron worker, newest cycles. Look for `Latest CGM Reading: ... @ N mg/dL` and `Latest CGM reading is stale (X min old`.
-   * X about 0-15 and no stale warning: the offset bug is not active for this account and (a) was the cause; alerts should start flowing (expect about 3/day at current thresholds). The bug is still a latent hazard and should be fixed.
-   * X about 240+, 420+ or 480+ min (4/7/8 h) with a connected phone and a live sensor: the offset bug is confirmed as the cause.
-2. One-off local check of the raw field (uses your own credentials, prints three readings):
+1. Vercel logs of the cron worker, newest cycles. `Latest CGM reading is stale (X min old` should no longer appear for a live feed; the logged age should be about 0-10 min. An age near 425 min would mean the fix is not deployed.
+2. Optional one-off local check of the raw field (uses your own credentials, prints three readings):
 
 ```bash
 uv run python -c "

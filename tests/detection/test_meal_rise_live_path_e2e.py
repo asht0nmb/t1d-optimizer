@@ -17,13 +17,13 @@ objects built from Share-shaped JSON, ``requests.post`` is patched (so the REAL
 ``send_telegram_message`` formats the request), storage is ``InMemoryStorage``
 and ``now`` is injected. Nothing here touches Dexcom, Telegram or Supabase.
 
-Known bug (NOT fixed here; ``apps/personal/cron`` is owned elsewhere)
----------------------------------------------------------------------
-``apps/personal/cron/detect_meal_rise.py`` (``fetch_dexcom_cgm``, the
-``dt_utc = r.datetime.replace(tzinfo=timezone.utc)`` line) is wrong for any
-nonzero ``DT`` offset. The offset-parametrized tests below are ``xfail(strict=True)``
-so the suite stays green today and flips to a hard failure the moment the bug is
-fixed (at which point drop the markers). Proposed fix::
+Historical bug (fixed by PR #15, ``fix/live-loop-observability``)
+-----------------------------------------------------------------
+``fetch_dexcom_cgm`` used ``dt_utc = r.datetime.replace(tzinfo=timezone.utc)``,
+which is wrong for any nonzero ``DT`` offset (confirmed on live data: a reading
+5.0 min old was computed as 425.0 min old at the account's -0700 offset). The
+offset-parametrized tests below therefore must pass; they fail on code that
+predates that fix. The shipped fix is equivalent to::
 
     dt = r.datetime
     dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -204,21 +204,11 @@ def _assert_fired(live: Callable, storage: InMemoryStorage, anchor_utc: datetime
 # The headline end-to-end scenario
 # --------------------------------------------------------------------------- #
 
-OFFSET_BUG = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG apps/personal/cron/detect_meal_rise.py fetch_dexcom_cgm: "
-        "r.datetime.replace(tzinfo=utc) relabels a tz-aware pydexcom datetime "
-        "(DT offset) and shifts the instant by the offset, so every reading "
-        "looks >=offset hours stale and the freshness guard skips every cycle."
-    ),
-)
-
 OFFSETS = [
     pytest.param("+0000", id="dt_offset_0000"),
-    pytest.param("-0400", id="dt_offset_-0400", marks=OFFSET_BUG),
-    pytest.param("-0700", id="dt_offset_-0700_PDT", marks=OFFSET_BUG),
-    pytest.param("-0800", id="dt_offset_-0800_PST", marks=OFFSET_BUG),
+    pytest.param("-0400", id="dt_offset_-0400"),
+    pytest.param("-0700", id="dt_offset_-0700_PDT"),
+    pytest.param("-0800", id="dt_offset_-0800_PST"),
 ]
 
 
