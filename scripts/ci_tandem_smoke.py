@@ -26,9 +26,15 @@ Environment variables (required, supplied by the workflow from repo secrets):
     TCONNECT_PASSWORD
 
 Exit codes:
-    0 — auth + fetch succeeded
-    1 — auth, metadata, or fetch failed
+    0 — auth + fetch succeeded and returned events with no failed chunk
+    1 — auth, metadata, or fetch failed; OR any fetch chunk failed; OR the
+        window returned zero events (a "green" smoke that fetched nothing is
+        exactly the silent failure this test exists to catch)
     2 — required env vars not set
+
+All logging is redacted at the handler level (ingestion.redaction): serials
+are masked to the last 4 characters; UUIDs, emails and pumperId URL segments
+never reach the public Actions log.
 """
 
 from __future__ import annotations
@@ -38,10 +44,6 @@ import os
 import sys
 from datetime import date, timedelta
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-)
 logger = logging.getLogger("ci_tandem_smoke")
 
 
@@ -75,11 +77,17 @@ def _check_env() -> None:
 
 def _mask_serial(serial: object) -> str:
     """Return last-4 of a pump serial, suitable for log lines."""
-    s = str(serial)
-    return f"…{s[-4:]}" if len(s) >= 4 else "…"
+    from ingestion.redaction import mask_serial
+
+    return mask_serial(serial)
 
 
 def main() -> int:
+    from ingestion import redaction
+
+    redaction.configure_logging(
+        fmt="%(asctime)s %(levelname)s %(name)s — %(message)s", datefmt=None
+    )
     _check_env()
 
     # Defer ingestion imports until after the env check so a missing-secret
@@ -94,12 +102,17 @@ def main() -> int:
         logger.error("Authentication failed: %s", type(exc).__name__)
         return 1
     logger.info("Authentication succeeded.")
+    redaction.protect_identifiers(api=api)
+    redaction.install_redaction()  # re-harden anything added during login
 
     try:
         metadata = get_pump_metadata(api)
     except Exception as exc:  # noqa: BLE001
         logger.error("pump_event_metadata failed: %s", type(exc).__name__)
         return 1
+
+    redaction.protect_identifiers(metadata=metadata)
+    redaction.install_redaction()
 
     if not metadata:
         logger.error("No pumps found on account; nothing to fetch.")
@@ -123,7 +136,7 @@ def main() -> int:
     )
 
     try:
-        events, _last_successful_end = fetch_pump_events(
+        fetched = fetch_pump_events(
             api,
             device_id,
             start.isoformat(),
@@ -135,15 +148,19 @@ def main() -> int:
         logger.error("pump_events fetch failed: %s", type(exc).__name__)
         return 1
 
-    logger.info("Fetched %d raw events.", len(events))
+    events = fetched.events
+    logger.info(
+        "Fetched %d raw events (%d/%d chunks failed).",
+        len(events), fetched.chunks_failed, fetched.chunks_total,
+    )
 
+    # Fail loud: a smoke run that fetched nothing, or swallowed a chunk
+    # error, must not be green.
+    failures: list[str] = []
+    if fetched.chunks_failed:
+        failures.append(f"{fetched.chunks_failed} fetch chunk(s) failed")
     if not events:
-        # Auth + fetch path is healthy; the window simply held nothing.
-        # Still a green run — the goal is validating the handshake.
-        logger.warning(
-            "No events returned in window. Auth + fetch path is healthy; "
-            "consider widening the window in a follow-up if this persists."
-        )
+        failures.append("zero events returned")
 
     # No config → no enrichment. We only need per-category counts for the
     # summary line; enrichment isn't part of what this spike is validating.
@@ -165,6 +182,9 @@ def main() -> int:
             print(f"  {name:<20} : {len(dfs[name])}")
     print("=" * 60)
 
+    if failures:
+        logger.error("Smoke test FAILED: %s.", "; ".join(failures))
+        return 1
     return 0
 
 

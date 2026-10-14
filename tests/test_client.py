@@ -170,7 +170,7 @@ class TestFetchPumpEventsChunking:
         """70 days with chunk_days=30 ⇒ 3 chunks."""
         fake_api.pump_events.return_value = iter([])
 
-        events, last_end = client.fetch_pump_events(
+        result = client.fetch_pump_events(
             fake_api,
             device_id=42,
             start_date="2026-01-01",
@@ -178,6 +178,7 @@ class TestFetchPumpEventsChunking:
             pump_serial="SN1",
             chunk_days=30,
         )
+        events, last_end = result.events, result.last_successful_end
 
         assert fake_api.pump_events.call_count == 3
         calls = fake_api.pump_events.call_args_list
@@ -231,13 +232,14 @@ class TestFetchPumpEventsChunking:
 
     def test_zero_length_range_produces_no_calls(self, fake_api):
         """start == end ⇒ no chunks, no API calls, last_end is None."""
-        events, last_end = client.fetch_pump_events(
+        result = client.fetch_pump_events(
             fake_api,
             device_id=1,
             start_date="2026-01-01",
             end_date="2026-01-01",
             pump_serial="SN1",
         )
+        events, last_end = result.events, result.last_successful_end
 
         assert fake_api.pump_events.call_count == 0
         assert events == []
@@ -303,7 +305,7 @@ class TestFetchPumpEventsApiCall:
             iter([ev3]),
         ]
 
-        events, last_end = client.fetch_pump_events(
+        result = client.fetch_pump_events(
             fake_api,
             device_id=1,
             start_date="2026-01-01",
@@ -311,6 +313,7 @@ class TestFetchPumpEventsApiCall:
             pump_serial="SN1",
             chunk_days=30,
         )
+        events, last_end = result.events, result.last_successful_end
 
         assert events == [ev1, ev2, ev3]
         assert last_end == "2026-02-15"
@@ -327,7 +330,8 @@ class TestFetchPumpEventsErrorHandling:
         Three chunks: success, fail, success. Verify:
           - events from successful chunks are returned
           - subsequent chunks ARE attempted (loop does not abort)
-          - last_successful_end reflects the last SUCCESS, not the failure
+          - last_successful_end stops at the contiguous successful prefix
+            (chunk 1) so the failed middle chunk is retried next run
         """
         ev_a, ev_c = MagicMock(name="event_a"), MagicMock(name="event_c")
         fake_api.pump_events.side_effect = [
@@ -336,7 +340,7 @@ class TestFetchPumpEventsErrorHandling:
             iter([ev_c]),
         ]
 
-        events, last_end = client.fetch_pump_events(
+        result = client.fetch_pump_events(
             fake_api,
             device_id=1,
             start_date="2026-01-01",
@@ -344,11 +348,16 @@ class TestFetchPumpEventsErrorHandling:
             pump_serial="SN1",
             chunk_days=30,
         )
+        events, last_end = result.events, result.last_successful_end
 
         assert fake_api.pump_events.call_count == 3
         assert events == [ev_a, ev_c]
-        # Last success is the third chunk whose end is the clamped end date.
-        assert last_end == "2026-03-12"
+        # Bookmark must NOT jump past the failed middle chunk (chunk 1 ends
+        # 2026-01-31); otherwise the gap is never retried.
+        assert last_end == "2026-01-31"
+        assert result.chunks_failed == 1
+        assert result.chunks_total == 3
+        assert result.failed_ranges == ["2026-01-31 → 2026-03-02"]
 
     def test_last_successful_end_when_final_chunk_fails(self, fake_api):
         """If only the last chunk fails, last_successful_end is the previous chunk's end."""
@@ -359,7 +368,7 @@ class TestFetchPumpEventsErrorHandling:
             RuntimeError("boom"),
         ]
 
-        events, last_end = client.fetch_pump_events(
+        result = client.fetch_pump_events(
             fake_api,
             device_id=1,
             start_date="2026-01-01",
@@ -367,6 +376,7 @@ class TestFetchPumpEventsErrorHandling:
             pump_serial="SN1",
             chunk_days=30,
         )
+        events, last_end = result.events, result.last_successful_end
 
         assert events == [ev_a, ev_b]
         # Second chunk's max_date (30 days after 2026-01-31 = 2026-03-02)
@@ -375,7 +385,7 @@ class TestFetchPumpEventsErrorHandling:
     def test_all_chunks_fail_returns_empty_events_and_none_last_end(self, fake_api):
         fake_api.pump_events.side_effect = RuntimeError("boom")
 
-        events, last_end = client.fetch_pump_events(
+        result = client.fetch_pump_events(
             fake_api,
             device_id=1,
             start_date="2026-01-01",
@@ -383,6 +393,7 @@ class TestFetchPumpEventsErrorHandling:
             pump_serial="SN1",
             chunk_days=30,
         )
+        events, last_end = result.events, result.last_successful_end
 
         assert events == []
         assert last_end is None
@@ -394,7 +405,7 @@ class TestFetchPumpEventsErrorHandling:
             iter([ev_b]),
         ]
 
-        events, last_end = client.fetch_pump_events(
+        result = client.fetch_pump_events(
             fake_api,
             device_id=1,
             start_date="2026-01-01",
@@ -402,6 +413,60 @@ class TestFetchPumpEventsErrorHandling:
             pump_serial="SN1",
             chunk_days=30,
         )
+        events, last_end = result.events, result.last_successful_end
 
         assert events == [ev_b]
-        assert last_end == "2026-02-15"
+        # First chunk failed: no contiguous prefix, so no safe bookmark.
+        assert last_end is None
+        assert result.chunks_failed == 1
+
+
+class TestFetchResultFailureReporting:
+    def test_all_success_reports_zero_failed(self, fake_api):
+        fake_api.pump_events.return_value = iter([])
+        result = client.fetch_pump_events(
+            fake_api, device_id=1, start_date="2026-01-01", end_date="2026-03-12",
+            pump_serial="SN1", chunk_days=30,
+        )
+        assert result.chunks_failed == 0
+        assert result.chunks_total == 3
+        assert result.failed_ranges == []
+
+    def test_all_fail_counts_every_chunk(self, fake_api):
+        fake_api.pump_events.side_effect = RuntimeError("boom")
+        result = client.fetch_pump_events(
+            fake_api, device_id=1, start_date="2026-01-01", end_date="2026-03-12",
+            pump_serial="SN1", chunk_days=30,
+        )
+        assert result.chunks_failed == 3
+        assert result.events == []
+        assert result.last_successful_end is None
+
+    def test_failure_after_prefix_keeps_prefix_end_even_if_later_succeeds(self, fake_api):
+        # ok, ok, FAIL, ok  -> bookmark = end of chunk 2
+        fake_api.pump_events.side_effect = [
+            iter([MagicMock()]), iter([MagicMock()]), RuntimeError("x"), iter([MagicMock()]),
+        ]
+        result = client.fetch_pump_events(
+            fake_api, device_id=1, start_date="2026-01-01", end_date="2026-04-20",
+            pump_serial="SN1", chunk_days=30,
+        )
+        assert result.chunks_total == 4
+        assert result.chunks_failed == 1
+        assert len(result.events) == 3
+        assert result.last_successful_end == "2026-03-02"
+
+
+class TestFetchLogsAreMasked:
+    def test_full_serial_never_in_log_records(self, fake_api, caplog):
+        full_serial = "90012345678"
+        fake_api.pump_events.side_effect = [iter([MagicMock()]), RuntimeError("boom")]
+        with caplog.at_level("INFO", logger="ingestion.client"):
+            client.fetch_pump_events(
+                fake_api, device_id=1, start_date="2026-01-01", end_date="2026-02-15",
+                pump_serial=full_serial, chunk_days=30,
+            )
+        assert caplog.records
+        for rec in caplog.records:
+            assert full_serial not in rec.getMessage()
+        assert any("…5678" in rec.getMessage() for rec in caplog.records)

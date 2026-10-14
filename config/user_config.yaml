@@ -84,6 +84,15 @@ meal_rise_calibration:
   correction_lookahead_minutes: 180   # window to attribute an uncovered miss to a user/auto correction
 
 
+# ---------------------------------------------------------------------------
+# Sync health alerts (owner-editable). The nightly Tandem sync pages Telegram
+# when data goes stale even though the job itself ran fine. Hours, all > 0.
+# Read by ingestion/sync_health.py; defaults apply if this block is removed.
+# ---------------------------------------------------------------------------
+sync_health:
+  max_pump_upload_age_hours: 24   # alert if Tandem has not received a pump upload for this long (t:connect app closed?)
+  max_pump_cgm_gap_hours: 6       # alert if the pump logged basal delivery but no CGM readings for this long (G7 unpaired from pump?)
+
 # Live loop observability (apps/personal/cron/live_health.py). All keys optional;
 # the code defaults below apply when the block is absent.
 live_health:
