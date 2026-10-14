@@ -13,6 +13,12 @@ export async function createSessionClient() {
         getAll() {
           return cookieStore.getAll();
         },
+        // The second `headers` arg (Cache-Control/Expires/Pragma from
+        // @supabase/ssr) is deliberately not applied here: there is no
+        // response object in a Server Component, and requireSession() returns
+        // before the route builds its response. Page refreshes are handled
+        // (with cache headers) by proxy.ts; see
+        // docs/updates/2026-10-14-web-ssr-cache-headers.md for the /api gap.
         setAll(cookiesToSet) {
           try {
             cookiesToSet.forEach(({ name, value, options }) =>

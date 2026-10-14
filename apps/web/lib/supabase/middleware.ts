@@ -8,13 +8,35 @@ export function hasSupabaseMiddlewareEnv(): boolean {
   );
 }
 
+function isPublicAuthPath(pathname: string): boolean {
+  return pathname.startsWith("/login") || pathname.startsWith("/auth");
+}
+
+function redirectToLogin(request: NextRequest) {
+  const url = request.nextUrl.clone();
+  url.pathname = "/login";
+  url.searchParams.set("next", request.nextUrl.pathname);
+  return NextResponse.redirect(url);
+}
+
 export async function updateSession(request: NextRequest) {
-  // Fail open when env is misconfigured so the proxy does not crash all routes.
+  // Fail CLOSED when env is misconfigured: without Supabase we cannot verify
+  // a session, so every non-public page is sent to /login (same redirect as
+  // the unauthenticated branch below). /login and /auth/* stay reachable.
   if (!hasSupabaseMiddlewareEnv()) {
-    return NextResponse.next({ request });
+    if (isPublicAuthPath(request.nextUrl.pathname)) {
+      return NextResponse.next({ request });
+    }
+    return redirectToLogin(request);
   }
 
   let supabaseResponse = NextResponse.next({ request });
+  // @supabase/ssr >= 0.10 passes cache-busting headers (Cache-Control /
+  // Expires / Pragma) to setAll alongside auth cookies, but only on the FIRST
+  // cookie write per client (later calls get {}). setAll rebuilds the
+  // response each call, so accumulate and re-apply them every time so a
+  // CDN/shared cache never stores a token-refresh Set-Cookie.
+  const cacheHeaders: Record<string, string> = {};
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -24,13 +46,17 @@ export async function updateSession(request: NextRequest) {
         getAll() {
           return request.cookies.getAll();
         },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet, headers) {
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value),
           );
           supabaseResponse = NextResponse.next({ request });
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, options),
+          );
+          Object.assign(cacheHeaders, headers ?? {});
+          Object.entries(cacheHeaders).forEach(([key, value]) =>
+            supabaseResponse.headers.set(key, value),
           );
         },
       },
@@ -42,13 +68,11 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const isLogin = request.nextUrl.pathname.startsWith("/login");
-  const isAuthCallback = request.nextUrl.pathname.startsWith("/auth");
 
-  if (!user && !isLogin && !isAuthCallback) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    url.searchParams.set("next", request.nextUrl.pathname);
-    return NextResponse.redirect(url);
+  // Redirects below intentionally do not carry the refreshed cookies (and so
+  // need no cache headers) — unchanged from prior behavior.
+  if (!user && !isPublicAuthPath(request.nextUrl.pathname)) {
+    return redirectToLogin(request);
   }
 
   if (user && isLogin) {
