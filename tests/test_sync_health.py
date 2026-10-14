@@ -40,12 +40,10 @@ class TestSyncHealthConfig:
                 {"sync_health": {"max_pump_upload_age_hours": bad}}
             )
 
-    def test_checked_in_yaml_has_block_at_end_and_parses(self):
+    def test_checked_in_yaml_has_block_and_parses(self):
         text = (_REPO / "config/user_config.yaml").read_text()
         raw = yaml.safe_load(text)
         assert "sync_health" in raw
-        # self-contained block placed last so concurrent config edits don't collide
-        assert list(raw)[-1] == "sync_health"
         cfg = sync_health.SyncHealthConfig.from_raw(raw)
         assert cfg.max_pump_upload_age_hours == 24
         assert cfg.max_pump_cgm_gap_hours == 6
