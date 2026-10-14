@@ -19,7 +19,7 @@ Complete inventory of available data streams for the t1d-engine project. Use thi
 ## 2. Source 1: Tandem CSV Export
 
 ### File Locations
-- Real data: `data/CSV_Meyer-BibbinsAshton_…3861_20Mar2026_2109.csv`
+- Real data: `data/CSV_<name>_<pump-serial>_<export-date>.csv`
 - Test copy: `test_data/CSV_patient-data_copy.csv`
 
 ### File Structure
@@ -34,15 +34,15 @@ Each section has its own header row. Sections are separated by blank lines. The 
 
 ### 2.1 EGV Section (CGM Readings)
 
-7,407 rows. 5-minute intervals. Date range: Feb 21 – Mar 20, 2026.
+7,407 rows. 5-minute intervals. Date range: ~4 weeks in early 2026.
 
 | Column | Type | Example | Notes |
 |---|---|---|---|
 | DeviceType | str | `t:slim X2™ Insulin Pump` | Constant |
-| SerialNumber | int | `…3861` | Constant for this export |
+| SerialNumber | int | `<pump-serial>` | Constant for this export |
 | Description | str | `EGV` | Constant |
 | EventDateTime | str | `2026-02-21T00:03:01` | ISO 8601, **no timezone** |
-| Readings (mg/dL) | int | `127` | BG value |
+| Readings (mg/dL) | int | `127` | BG value (illustrative) |
 
 ### 2.2 Manual BG Section
 
@@ -57,11 +57,11 @@ Each section has its own header row. Sections are separated by blank lines. The 
 | Type | str | `Bolus` | Always "Bolus" |
 | BolusType | str | `Food`, `Correction`, `Food / Correction`, `Auto`, `Override` | Key for meal detection — Food/Food+Correction = user meal bolus, Auto = Control-IQ, Override = manual |
 | BolusDeliveryMethod | str | `Standard`, `Auto` | Standard = user-initiated, Auto = CIQ algorithm |
-| BG (mg/dL) | int | `141` | BG at time of bolus |
-| SerialNumber | int | `…3861` | Constant |
-| CompletionDateTime | str | `2026-02-21T00:15:56` | ISO 8601, **no timezone** |
-| InsulinDelivered | float | `5.94` | Total units delivered |
-| FoodDelivered | float | `5.94` | Insulin portion for carbs |
+| BG (mg/dL) | int | `<int>` | BG at time of bolus |
+| SerialNumber | int | `<pump-serial>` | Constant |
+| CompletionDateTime | str | `2026-02-21T00:15:56` (illustrative) | ISO 8601, **no timezone** |
+| InsulinDelivered | float | `5.0` | Total units delivered (illustrative) |
+| FoodDelivered | float | `5.0` | Insulin portion for carbs (illustrative) |
 | CorrectionDelivered | float | `0` | Insulin portion for correction |
 | CompletionStatusDesc | str | `Completed` | Bolus completion status |
 | BolexStartDateTime | str | *(empty)* | Extended bolus — unused in this dataset |
@@ -70,10 +70,10 @@ Each section has its own header row. Sections are separated by blank lines. The 
 | BolexCompletionStatusDesc | str | *(empty)* | Extended bolus — unused |
 | StandardPercent | int | `100` | Always 100 (no extended boluses) |
 | Duration (mins) | int | `0` | Always 0 (no extended boluses) |
-| CarbSize | int | `25` | Grams of carbs entered. 0 for Auto/Correction boluses. |
-| TargetBG (mg/dL) | int | `110` | From pump profile at time of bolus |
-| CorrectionFactor | int | `20` | ISF at time of bolus (mg/dL per unit) |
-| CarbRatio | float | `4.2` | Carb ratio at time of bolus (grams per unit) |
+| CarbSize | int | `25` | Grams of carbs entered (illustrative). 0 for Auto/Correction boluses. |
+| TargetBG (mg/dL) | int | `<owner-specific>` | From pump profile at time of bolus (mg/dL) |
+| CorrectionFactor | int | `<owner-specific>` | ISF at time of bolus (mg/dL per unit) |
+| CarbRatio | float | `<owner-specific>` | Carb ratio at time of bolus (grams per unit) |
 
 ---
 
@@ -89,18 +89,16 @@ Each section has its own header row. Sections are separated by blank lines. The 
 
 | # | Serial | Software | Data Range |
 |---|---|---|---|
-| 0 | …4750 | Control-IQ, 7.4 | 2021-01-01 → 2022-03-19 |
-| 1 | …4922 | CONTROLIQ 7.6.0.1 | 2022-01-01 → 2023-10-04 |
-| 2 | …3745 | CONTROLIQ 7.8 Release | 2023-01-01 → 2024-08-02 |
-| 3 | …9083 | CONTROLIQ 7.8 Release | 2024-01-01 → 2024-11-09 |
-| 4 | …7084 | CONTROLIQ 7.8 Release | 2024-01-02 → 2025-12-09 |
-| 5 | **…3861** | **CONTROLIQ+ 7.9.0.1** | **2025-01-01 → present** |
+| 0..N-1 | `<retired-pump-serial>` | Control-IQ firmware (varies per pump) | per-pump date range (owner-specific) |
+| N | **`<active-pump-serial>`** | **CONTROLIQ+ (current)** | **most recent range → present** |
 
-Current pump: serial `…3861`. Last upload: 2026-03-22.
+Current pump: the highest-numbered device (`<active-pump-serial>`). Last upload date is owner-specific.
+
+The account holds multiple pumps (one active, the rest retired); serials and per-pump date ranges are intentionally omitted.
 
 ### 3.3 Event Type Inventory
 
-From a 22-day sample (Mar 1–22, 2026): 16,441 total events.
+From a ~3-week sample (March 2026): event counts below show the relative event mix (engineering reference only).
 
 | Category | Event Type | Count | ~Per Day | Key Fields |
 |---|---|---|---|---|
@@ -140,15 +138,14 @@ From a 22-day sample (Mar 1–22, 2026): 16,441 total events.
 
 From `device['lastUpload']['settings']` — the programmed pump settings at time of last upload.
 
-**Active Basal Profile ("Profile 1"):**
+**Active Basal Profile ("Profile 1"):** a time-of-day segmented profile. Real values are owner-specific and intentionally not published here; they live in `config/user_config.yaml`.
 
-| Time | Basal (u/hr) | ISF (mg/dL per u) | Carb Ratio (g/u) | Target BG |
+| Time | Basal (u/hr) | ISF (mg/dL per u) | Carb Ratio (g/u) | Target BG (mg/dL) |
 |---|---|---|---|---|
-| 00:00 | 1.000 | 23 | 4.2 | 110 |
-| 03:00 | 1.200 | 23 | 4.2 | 110 |
-| 06:00 | 1.550 | 23 | 4.2 | 110 |
-| 12:00 | 1.450 | 18 | 4.2 | 110 |
-| 18:00 | 1.550 | 20 | 4.2 | 110 |
+| 00:00 | `<owner-specific>` | `<owner-specific>` | `<owner-specific>` | `<owner-specific>` |
+| *(further segments, one row per profile change)* | | | | |
+
+Shape only: a profile has several segments per day, each carrying all four settings.
 
 Note: These are current settings only. Historical profile changes are not directly available from the API.
 
@@ -163,7 +160,7 @@ The ingestion layer should produce these DataFrames from API events:
 | timestamp | datetime64[tz] | `eventTimestamp.datetime` | Timezone-aware (America/Los_Angeles) |
 | bg_mgdl | int64 | `currentglucosedisplayvalue` | mg/dL, ready to use |
 
-Stats (22-day sample, n=6,348): mean=158.4, std=65.5, min=33, Q1=110, median=144, Q3=195, max=439
+Stats: omitted (owner-specific). Regenerate with `cgm_df.bg_mgdl.describe()` on local data.
 
 **`bolus_df`** — Completed boluses
 
@@ -398,9 +395,9 @@ Not yet implemented. Will provide real-time Dexcom G7 CGM readings every 5 minut
 
 ### Bug 2: `commandedRate` is milliunits/hr, not u/hr ✅ RESOLVED
 
-**Problem:** The notebook documents `commandedRate` as "already in u/hr" and does not divide. But `basal_df.describe()` shows mean=1396, max=6898.
+**Problem:** The notebook documents `commandedRate` as "already in u/hr" and does not divide. But `basal_df.describe()` shows a mean in the low thousands and a max several times higher.
 
-**Verification:** Pump profile basal rates are 1.0–1.55 u/hr. 1396/1000 = 1.396 u/hr — matches the profile range. 6898/1000 = 6.898 u/hr — plausible CIQ correction max.
+**Verification:** Raw `commandedRate` values are in the thousands (e.g. ~1000-1500 for typical profile segments). Dividing by 1000 yields a few u/hr, matching the pump profile range; the max raw value divided by 1000 is a plausible Control-IQ auto-correction rate.
 
 **Conclusion:** `commandedRate` is in milliunits/hr. Divide by 1000 when building `basal_df`.
 

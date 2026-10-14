@@ -18,9 +18,9 @@ A **single occlusion alarm** is typically a normal, isolated occlusion — air b
 
 When the pump battery dies (BatteryShutdownAlarm), a "site change" (cartridge + tubing fill) is **required by the pump firmware** to resume insulin delivery. This does not mean the user actually changed their infusion site.
 
-**Example from Mar 19:**
-- 08:06 — BatteryShutdownAlarm, pump dies
-- 11:53 — site_change (cartridge, insulin_volume=180) + site_change (tubing) logged
+**Example (one day in March 2026; times omitted):**
+- BatteryShutdownAlarm, pump dies
+- Hours later — site_change (cartridge, partial `insulin_volume`) + site_change (tubing) logged
 - These are just the steps required to get the pump running again after charging
 
 ~90% of the time, this is not a full site change — the user is refilling/repriming the same site.
@@ -30,9 +30,9 @@ When the pump battery dies (BatteryShutdownAlarm), a "site change" (cartridge + 
 **How to distinguish real vs forced in the pump-death case:** The presence of a cannula prime does NOT reliably indicate a real site change. The actual indicator is the **cartridge fill amount** (`insulin_volume` in the site_change details). If the cartridge fill amount exceeds a threshold (TBD — user will determine this value), it's a real full site change even post-battery-death. Below that threshold, the user is just topping off insulin to get the pump running again.
 
 **Data observed:**
-- Mar 18 10:18: cartridge insulin_volume=240 — real full site change (post battery death)
-- Mar 19 11:53: cartridge insulin_volume=180 — forced restart only (battery death at 08:06)
-- Mar 20 23:55: cartridge insulin_volume=240 — not post battery death, so real regardless
+- Post-battery-death, large cartridge fill (near full capacity) — real full site change
+- Post-battery-death, noticeably smaller fill — forced restart only
+- Large fill not preceded by battery death — real regardless
 
 **Cartridge fill amount is already logged** in `events.parquet` under `details` JSON for `event_subtype=cartridge`. No pipeline change needed for capture — but the detection engine will need to parse this value and apply the threshold.
 

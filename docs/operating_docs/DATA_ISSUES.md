@@ -8,18 +8,18 @@ Findings from real-data verification against the Tandem t:connect app.
 
 ## 1. Stale CGM readings on sensor reconnection
 
-**Observed:** 2026-03-19 at 12:03 — two CGM readings logged 1 second apart after a ~4-hour gap (pump battery died at 08:06, suspension logged as `reason=alarm`):
+**Observed:** March 2026 — two CGM readings logged 1 second apart after a multi-hour gap (pump battery died, suspension logged as `reason=alarm`). The first was the real, current reading; the second was a stale cached value from before the gap, far from the real value:
 
 ```
-2026-03-19 12:03:15  →  344 mg/dL  (real, current reading)
-2026-03-19 12:03:16  →  136 mg/dL  (stale, cached value from before the gap)
+<ts>:15  →  <real, current reading>
+<ts>:16  →  <stale, cached value from before the gap>
 ```
 
 **Cause:** When the pump loses power or CGM connection, it caches the last known BG value. On reconnection, it sometimes logs both the new reading and the stale cached value within 1 second. The Tandem app silently discards these; our pipeline does not.
 
-**Impact:** The stale reading appears on the CGM trace as a false data point (136 plotted at noon when BG was actually 344). It also skews daily statistics (mean, TIR, SD).
+**Impact:** The stale reading appears on the CGM trace as a false data point (a low value plotted when BG was actually much higher). It also skews daily statistics (mean, TIR, SD).
 
-**Severity:** This is not a rare edge case. Mar 18 alone had **5 stale readings** at 02:31, 04:51, 09:57, 10:01, and 16:01 — every CGM gap produced at least one. The stale values can be dramatically wrong (e.g., 355 → 126, a 229 mg/dL error). On a bad day with multiple gaps, this significantly corrupts aggregate statistics.
+**Severity:** This is not a rare edge case. A single bad day produced several stale readings — every CGM gap produced at least one. The stale values can be dramatically wrong (errors of 200+ mg/dL). On a bad day with multiple gaps, this significantly corrupts aggregate statistics.
 
 **When this can occur:**
 - Pump battery dies (as in this case — suspension with `reason=alarm`)
@@ -36,19 +36,19 @@ Findings from real-data verification against the Tandem t:connect app.
 
 ## 2. Alarms and alerts are not surfaced in any DataFrame
 
-**Observed:** 2026-03-19 had 27 alarm/alert events that are completely invisible in the pipeline output. The builder imports `LidAlarmActivated`, `LidAlarmCleared`, `LidAlertActivated`, `LidAlertCleared`, and the CGM alert variants, but only adds them to `_HANDLED_TYPES` to suppress warnings — they are never written to `events.parquet` or any other DataFrame.
+**Observed:** A single bad day (March 2026) had ~two dozen alarm/alert events that are completely invisible in the pipeline output. The builder imports `LidAlarmActivated`, `LidAlarmCleared`, `LidAlertActivated`, `LidAlertCleared`, and the CGM alert variants, but only adds them to `_HANDLED_TYPES` to suppress warnings — they are never written to `events.parquet` or any other DataFrame.
 
-**What's being lost (Mar 19 example):**
+**What's being lost (example day; times omitted):**
 
 | Time | Type | Detail |
 |------|------|--------|
-| 07:34 | LowPowerAlert cleared → LowPowerAlert2 activated | Battery warning escalation |
-| 08:06 | **BatteryShutdownAlarm** (id=12) | Pump died. Caused 227-min suspension |
-| 08:06 | ResumePumpAlarm2 (id=23) | Paired with battery shutdown |
-| 11:36 | PumpResetAlarm (id=3) | Pump rebooted after charging |
-| 12:03 | CGM alert (dalertidRaw=2, unmapped) | G7 sensor reconnecting |
-| 15:10 | IncompleteBolusAlert (id=11) | Bolus didn't fully deliver |
-| 22:36 | **OcclusionAlarm** (id=2) | Caused 20-second suspension |
+| T0 | LowPowerAlert cleared → LowPowerAlert2 activated | Battery warning escalation |
+| T1 | **BatteryShutdownAlarm** (id=12) | Pump died. Caused a multi-hour suspension |
+| T1 | ResumePumpAlarm2 (id=23) | Paired with battery shutdown |
+| T2 | PumpResetAlarm (id=3) | Pump rebooted after charging |
+| T3 | CGM alert (dalertidRaw=2, unmapped) | G7 sensor reconnecting |
+| T4 | IncompleteBolusAlert (id=11) | Bolus didn't fully deliver |
+| T5 | **OcclusionAlarm** (id=2) | Caused a ~20-second suspension |
 
 **Available data on alarm/alert events:**
 - `LidAlarmActivated`: `alarmidRaw` (int), `alarmid` (enum name like `OcclusionAlarm`, `BatteryShutdownAlarm`), `param1`, `param2`, timestamp
@@ -79,17 +79,17 @@ Findings from real-data verification against the Tandem t:connect app.
 
 **Observed:** `LidPumpingSuspended` only has `suspendreasonRaw` which maps to generic reasons: `user` (0), `alarm` (1), `malfunction` (2), `plgs_auto` (6). When a suspension is caused by an alarm, there is **no field on the suspension event** that identifies which specific alarm triggered it.
 
-**Example from Mar 19:**
-- 08:06 suspension: `reason=alarm` — actually caused by `BatteryShutdownAlarm`
-- 22:36 suspension: `reason=alarm` — actually caused by `OcclusionAlarm`
+**Example (one day in March 2026):**
+- one suspension: `reason=alarm` — actually caused by `BatteryShutdownAlarm`
+- another suspension: `reason=alarm` — actually caused by `OcclusionAlarm`
 
 Both show identically as `suspend_reason=alarm` in `suspension.parquet`. The critical clinical difference (battery death vs. occlusion) is invisible.
 
 **Correlation strategy:** `LidAlarmActivated` events fire at the **exact same timestamp** as `LidPumpingSuspended` when the alarm causes the suspension. The specific alarm can be identified by matching on timestamp:
 
 ```
-22:36:35  LidAlarmActivated  alarmidRaw=2  OcclusionAlarm
-22:36:35  LidPumpingSuspended  reason=alarm
+<ts>  LidAlarmActivated  alarmidRaw=2  OcclusionAlarm
+<ts>  LidPumpingSuspended  reason=alarm
 ```
 
 **Fix needed:** During `build_suspension_df`, cross-reference `LidAlarmActivated` events to enrich suspensions with the specific alarm name. Add columns:
@@ -109,14 +109,14 @@ This replaces the generic `suspend_reason=alarm` with actionable information lik
 tconnectsync maps alert IDs 0–49 to named enums but IDs 50+ fall through as `DefaultAlertNN`. Cross-referencing all activations against CGM readings reveals their meaning:
 
 **Alert51 (param2=873) = Low BG alert**
-Fires when BG is near or at ~70-80 mg/dL and dropping. Confirmed across 5 activations:
-- BG at activation: 73, 136 (stale — actual was lower), 68, 82, 81 mg/dL
+Fires when BG is near or at ~70-80 mg/dL and dropping. Confirmed across a handful of activations:
+- BG at activation: near or below the ~70-80 mg/dL range (one case a stale cached value that overstated BG)
 - Cleared when BG recovers above threshold
 
 **Alert50 (param2=862) = High BG alert**
-Fires when BG exceeds ~200 mg/dL. Confirmed across 19 activations:
-- BG at activation: 201–315 mg/dL (every single one ≥200)
-- Very frequent — fires 10+ times across a bad 5-day stretch
+Fires when BG exceeds ~200 mg/dL. Confirmed across ~20 activations:
+- BG at activation: every single one ≥200 mg/dL
+- Very frequent — fires many times across a bad multi-day stretch
 
 **The param2 values (862, 873) are not mg/dL** — they appear to be pump-internal threshold encodings, constant across all activations of the same alert type.
 
@@ -125,11 +125,11 @@ Fires when BG exceeds ~200 mg/dL. Confirmed across 19 activations:
 
 **Full CGM alert map (dalertidRaw, all unmapped by tconnectsync):**
 - dalertidRaw=1 → `"cgm_urgent_low"` — fires at BG ~49, threshold 55 (param2). Rare.
-- dalertidRaw=2 → `"cgm_high"` — fires at BG ≥180, threshold 180 (param2). 29 activations in 5 days.
-- dalertidRaw=3 → `"cgm_low"` — fires at BG ≤75, threshold 75 (param2). 8 activations.
+- dalertidRaw=2 → `"cgm_high"` — fires at BG ≥180, threshold 180 (param2). Fires frequently.
+- dalertidRaw=3 → `"cgm_low"` — fires at BG ≤75, threshold 75 (param2). Less frequent.
 - dalertidRaw=6 → `"cgm_rise_rate"` — rapid rise alert. param1 ~30-36 (rate?), param2=3.0 (mg/dL/min threshold).
 - dalertidRaw=8 → `"cgm_fall_rate"` — rapid fall alert. param1 is uint overflow (negative rate), param2=3.0.
-- dalertidRaw=14 → `"cgm_out_of_range"` — **CGM signal lost.** 37 activations in 5 days, durations 4–150 min. param1=20 (timeout minutes). Pump reverts to base basal rate during these windows.
+- dalertidRaw=14 → `"cgm_out_of_range"` — **CGM signal lost.** Frequent; durations from minutes to a couple of hours. param1=20 (timeout minutes). Pump reverts to base basal rate during these windows.
 
 **Include in pipeline: YES — all of the above.** These should be in the `alarms.parquet` alongside pump-side alarms/alerts. The CGM out-of-range events (dalertidRaw=14) are especially critical — they define windows where the pump reverts to profile basal and the detection engine must know this. The BG threshold alerts (1, 2, 3) duplicate pump-side Alert50/51 but carry the actual BG value at activation in param1, which is more useful. The rate alerts (6, 8) are the only source for rapid-change detection from the sensor side.
 
@@ -144,7 +144,7 @@ Map during building:
 
 ## 6. CGM out-of-range windows not tracked
 
-**Observed:** `dalertidRaw=14` (OutOfRange) fires 37 times in a 5-day window, with durations from 4 to 150 minutes. During these windows, the pump has no CGM data and reverts to the programmed basal profile rate — Control-IQ cannot adjust.
+**Observed:** `dalertidRaw=14` (OutOfRange) fires frequently (dozens of times over a few days), with durations from minutes to a couple of hours. During these windows, the pump has no CGM data and reverts to the programmed basal profile rate — Control-IQ cannot adjust.
 
 This is distinct from the pump being dead (BatteryShutdownAlarm). During out-of-range:
 - The pump is running and delivering insulin, but only at the base profile rate
@@ -171,19 +171,19 @@ This is distinct from the pump being dead (BatteryShutdownAlarm). During out-of-
 - **Live readings**: `cgmDataTypeRaw=1`, `eventTimestamp` is the real reading time, `interval=0`
 - **Backfilled readings**: `cgmDataTypeRaw=2`, `eventTimestamp` is the reconnection time (all identical), `egvTimestamp` is the **actual sensor reading time**, `interval` = number of 5-min periods ago
 
-**Example from Mar 18** (pump dead 05:06–09:57):
-- At 09:57:18, 36 backfilled readings arrived all at once with `cgmDataTypeRaw=2`
-- Their `egvTimestamp` values decode to actual times from 06:56 to 09:51
-- BG during dead period: 168→349 mg/dL (rose continuously without insulin)
-- Our builder uses `eventTimestamp` for all CGM events, so all 36 readings get timestamp 09:57:18 and dedup to 1
+**Example (a pump-dead day in March 2026):**
+- On reconnection, ~3 hours of backfilled readings (dozens) arrived all at once with `cgmDataTypeRaw=2`
+- Their `egvTimestamp` values decode to the actual sensor times during the dead period
+- BG rose continuously during the dead period (no insulin delivered)
+- Our builder uses `eventTimestamp` for all CGM events, so all backfilled readings get the reconnection timestamp and dedup to 1
 
 **This is the data the Tandem app shows with the "out of range" visual styling** — the readings are real sensor data, just not available to the pump in real time.
 
 **Timestamp resolution:** Although `egvTimestamp` reflects when the sensor actually took the reading, `eventTimestamp` is when the pump received it — and that's what the pump bases decisions on. The pipeline should resolve to `eventTimestamp` for consistency with how the system operated in real time. The `egvTimestamp` should be stored as a secondary column (e.g., `sensor_timestamp`) for analysis purposes, but `timestamp` should remain `eventTimestamp`.
 
-**Only two cgmDataTypeRaw values exist:** `1` (live) and `2` (backfill). No other values observed across 5 days of data (1971 total CGM events).
+**Only two cgmDataTypeRaw values exist:** `1` (live) and `2` (backfill). No other values observed in the 5-day exploratory sample.
 
-**Scale of impact:** In this 5-day sample, **596 of 1971 CGM readings (30%) are backfilled**. This is not an edge case — it's a major data source. Without capturing these, any day with a pump disconnection loses up to 3 hours of CGM data, distorting daily statistics and creating false gaps in the CGM trace.
+**Scale of impact:** In the 5-day exploratory sample, roughly **30% of CGM readings were backfilled**. This is not an edge case — it's a major data source. Without capturing these, any day with a pump disconnection loses up to 3 hours of CGM data, distorting daily statistics and creating false gaps in the CGM trace.
 
 **Fix needed in `build_cgm_df`:**
 1. Check `cgmDataTypeRaw` on each CGM event
