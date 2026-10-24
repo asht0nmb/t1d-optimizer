@@ -43,11 +43,11 @@ dry-run honoring `--start`, arg parsing + invalid-date rejection). Suite:
 Ran `--start 2026-04-15` against prod Supabase. Inserted: cgm 7,835, basal
 12,363, requests 340, bolus 340, alarms 1,364, events 490, suspension 55,
 cgm_gaps 83 (skips = the one-day overlap). `fetch_state` for the active pump now
-bookmarks `last_successful_chunk_end = 2026-05-28`; pipeline version set to 3.
+bookmarks a `last_successful_chunk_end` at the end of May 2026; pipeline version set to 3.
 
-Supabase is current to **2026-05-28** — the active pump's latest data in Tandem's
+Supabase is current to **late May 2026** — the active pump's latest data in Tandem's
 cloud. Anything after that has not been uploaded from the pump to Tandem yet
-(pump-side, outside this pipeline's reach). The 5 retired pumps returned 0
+(pump-side, outside this pipeline's reach). The retired pumps returned 0
 events (their data predates the start), as expected.
 
 ## Follow-ups (owner)
@@ -55,4 +55,4 @@ events (their data predates the start), as expected.
 - The nightly Action should now succeed (incremental, fits the timeout). Watch
   the next run; if it still fails it's a separate cause (auth/secrets), not the
   window.
-- To pull past 2026-05-28, the pump first has to upload to Tandem.
+- To pull past that date, the pump first has to upload to Tandem.

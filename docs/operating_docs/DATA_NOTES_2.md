@@ -10,7 +10,7 @@ Domain knowledge from the user — session 4 (2026-03-24). Corrections and refin
 
 **Correction:** Backfilled readings (`cgmDataTypeRaw=2`) should use `egvTimestamp` (the actual sensor reading time) as their primary `timestamp`. The `eventTimestamp` (when the pump received the backfill burst) should be stored as a secondary column instead.
 
-**Why:** When the pump is dead (e.g., battery shutdown 08:06–12:03), the sensor continues collecting readings every 5 minutes. On reconnection, all backfilled readings arrive with the same `eventTimestamp` (12:03). Plotting them all at 12:03 creates a false cluster and hides the real BG trajectory during the gap. The sensor times (spread across 08:06–12:03) are what actually happened — the BG rose continuously without insulin.
+**Why:** When the pump is dead (e.g., a multi-hour battery shutdown), the sensor continues collecting readings every 5 minutes. On reconnection, all backfilled readings arrive with the same `eventTimestamp` (the reconnection time). Plotting them all at 12:03 creates a false cluster and hides the real BG trajectory during the gap. The sensor times (spread across the dead window) are what actually happened — the BG rose continuously without insulin.
 
 **How to apply:** In `build_cgm_df`, for backfilled readings (`cgmDataTypeRaw == 2`), use `egvTimestamp.datetime` as the primary `timestamp` column and store `eventTimestamp.datetime` as `pump_received_timestamp`. For live readings (`cgmDataTypeRaw == 1`), continue using `eventTimestamp.datetime` as `timestamp` (sensor_timestamp/pump_received_timestamp can be None or same).
 
