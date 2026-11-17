@@ -1,15 +1,15 @@
 # T1D Engine
 
-A personal data intelligence system for type 1 diabetics. Continuous glucose and insulin-pump data is pulled into the model and analyzed across two paths: specialized real-time alerts and a long view of the patterns that the device software does not surface.
+A personal data intelligence system for type 1 diabetics. Continuous glucose and insulin-pump data is pulled into the model and analyzed across two paths: a real-time missed-meal alert (built, currently paused) and a long view of the patterns that the device software does not surface.
 
 <!-- TODO: hero image goes here — a dashboard screenshot or a short GIF of the day view is the strongest thing you can put at the top for the application. -->
 
-When the live glucose curve climbs the way an unbolused meal does, the system sends a text within a few minutes:
+When the live glucose curve climbs the way an unbolused meal does, the live loop was built to send a text within a few minutes. The loop is currently paused. This is the message it sends:
 
 > **T1D Engine** · 1:12 PM
 > Glucose climbed from 128 to 173 mg/dL over the last 25 minutes. If that was a meal, it may still need a bolus.
 
-That alert is initialized at every instance of a missed meal bolus. The rest of the system turns the accumulated history into a readable and actionable display.
+That alert was triggered at every instance of a missed meal bolus. The rest of the system turns the accumulated history into a readable and actionable display.
 
 ## Background
 
@@ -19,7 +19,11 @@ It does not look across weeks at slower shifts or sensitivity changes. A diabeti
 
 ## What it does
 
-**Running today:** A live loop polls the Dexcom feed every five minutes and sends a missed-meal alert, like the one above, within minutes of a glucose rise. A nightly GitHub Actions workflow syncs Tandem pump history to Supabase (and pings Telegram if it fails). A Next.js dashboard (Vercel + Supabase) shows day view, heatmap, TIR trends, insulin, search, compare, an ambulatory-glucose-profile (AGP) chart, alert history, and an automation-health status page. A local Streamlit dashboard gives the same day/heatmap/TIR/insulin/AGP/compare views against parquet files with no cloud accounts required. A Telegram bot answers deterministic on-demand commands (`/today`, `/yesterday`, `/trends`, `/status`). A daily feature panel summarizes key BG statistics for any logged day.
+**Built, currently paused:** A live loop that polls the Dexcom feed every five minutes and sends a missed-meal alert, like the one above, within minutes of a glucose rise. It was paused on 2026-10-29 and is not running. The code is in the repository.
+
+**Current direction:** Build the data foundation, then validated metrics, then a metric suite, then an AI layer with its own evaluation. Correctness of the data and metrics comes before speed or new features.
+
+**Running today:** A nightly GitHub Actions workflow syncs Tandem pump history to Supabase (and pings Telegram if it fails). A Next.js dashboard (Vercel + Supabase) shows day view, heatmap, TIR trends, insulin, search, compare, an ambulatory-glucose-profile (AGP) chart, alert history, and an automation-health status page. A local Streamlit dashboard gives the same day/heatmap/TIR/insulin/AGP/compare views against parquet files with no cloud accounts required. A Telegram bot answers deterministic on-demand commands (`/today`, `/yesterday`, `/trends`, `/status`). A daily feature panel summarizes key BG statistics for any logged day.
 
 **On the roadmap:** Full episode reconstruction (the complete arc of a meal, low, or excursion); pattern clustering that surfaces recurring multi-week behavior; a sensitivity tracker that estimates how insulin settings drift over time; and an LLM-backed Telegram assistant for free-form Q&A and narrative digests (the deterministic commands above ship today; the LLM layer is deferred).
 
@@ -39,7 +43,7 @@ uv run python main.py dashboard          # Streamlit dashboard at localhost:8501
 Day-level CLI views: `uv run python main.py check --date 2026-06-01` and
 `uv run python main.py viz --date 2026-06-01 --view enriched`.
 
-The hosted shell (Supabase + Vercel + Telegram alerts) is documented in
+The hosted shell (Supabase + Vercel + Telegram, with the live alert loop paused) is documented in
 `docs/operating_docs/TECHNICAL_SPEC.md`.
 
 ## Detection and metrics
@@ -53,7 +57,7 @@ The detection engine is built in four layers, ordered by the accuracy level of e
 | **Pattern** | Aggregate, surfaces drift and recurring behavior |
 | **Cause** | Attribution, the hardest layer, integrates LLM insights|
 
-Only the Event layer is live today; Episode, Pattern, and Cause are roadmap.
+Only the Event layer is built, and its live loop is currently paused; Episode, Pattern, and Cause are roadmap.
 
 The single shared primitive under every layer is a windowing function that returns the glucose slice around an anchor, where the live case is just the zero-lookahead version of the retrospective one.
 
@@ -77,7 +81,7 @@ Signal-complexity analysis over glucose windows uses entropy-based measures from
 
 ## Architecture
 
-The system is a storage-agnostic core library with thin deployment shells around it. That separation enables a user to utilize the same detection and metric code in a local version running on their own machine, or in the cloud for a user who wants live detection.
+The system is a storage-agnostic core library with thin deployment shells around it. That separation enables a user to utilize the same detection and metric code in a local version running on their own machine, or in the cloud, where the live detection loop is built but currently paused.
 
 ```mermaid
 flowchart LR
@@ -124,11 +128,11 @@ Everything under `core/` is a set of pure functions over normalized DataFrames a
 
 Ingestion turns the raw device feeds into nine normalized tables, and an enrichment stage adds the domain logic. It categorizes each bolus and separates a forced site change after a battery shutdown from a real infusion-set rotation. It groups occlusions into suspected site failures and flags Control-IQ automated corrections so they are not counted as meal coverage.
 
-The cloud deployment runs the dashboard on Next.js and Vercel, stores data in Supabase Postgres with auth, takes inbound Telegram commands through a webhook, drives the live loop with an external cron service hitting a Vercel function every five minutes, and syncs the pump nightly through a GitHub Actions workflow. 
+The cloud deployment runs the dashboard on Next.js and Vercel, stores data in Supabase Postgres with auth, takes inbound Telegram commands through a webhook, and syncs the pump nightly through a GitHub Actions workflow. The live loop is built to run from an external cron service hitting a Vercel function every five minutes. It has been paused since 2026-10-29.
 
 ## Notes
 
-The core has a large test suite, including a contract suite that every storage backend passes identically, so swapping parquet for Postgres or for the in-memory store changes nothing a caller can see. Detection is pure and deterministic, the clustering is seeded so results reproduce, a version guard refuses to read on-disk data against decode logic it no longer matches, and a `doctor` command reports the state of the pipeline at a glance. The local version can run all analyses and detection; however, it can be storage-intensive and cannot support live alerts. 
+The core has a large test suite, including a contract suite that every storage backend passes identically, so swapping parquet for Postgres or for the in-memory store changes nothing a caller can see. Detection is pure and deterministic, the clustering is seeded so results reproduce, a version guard refuses to read on-disk data against decode logic it no longer matches, and a `doctor` command reports the state of the pipeline at a glance. The local version can run all analyses and detection; however, it can be storage-intensive and has no live alerts. 
 
 MIT licensed — see LICENSE (includes a medical notice). Contributions: see CONTRIBUTING.md.
 

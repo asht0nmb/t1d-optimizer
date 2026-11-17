@@ -126,7 +126,8 @@ def fetch_dexcom_cgm(meal_rise_config: MealRiseConfig, tz_name: str) -> pd.DataF
             "Missing Dexcom credentials in environment (DEXCOM_USERNAME / DEXCOM_PASSWORD)"
         )
 
-    logger.info("Connecting to Dexcom Share API (username: %s)...", username)
+    # Never log the username: it is an email address (account identifier).
+    logger.info("Connecting to Dexcom Share API...")
     dexcom = Dexcom(username=username, password=password, region=region)
 
     max_count = dexcom_max_count(

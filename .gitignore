@@ -52,3 +52,7 @@ node_modules/
 
 # notes
 /notes
+
+# Claude Code local state
+.claude/worktrees/
+.claude/settings.local.json
