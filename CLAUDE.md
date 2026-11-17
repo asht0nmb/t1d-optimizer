@@ -1,128 +1,90 @@
-# CLAUDE.md
+<!--
+Maintainer notes (stripped before Claude reads this file).
+- Keep this file under ~150 lines. It loads into every session, so every line costs context and dilutes the rest.
+- Area-specific detail lives in .claude/rules/*.md with `paths:` frontmatter, which loads only when Claude touches matching files.
+- Do not put counts, dates of last runs, or production status here. They go stale and caused two truth-up PRs (#23, #29). Put them in a dated docs/updates/ entry.
+- Add a line here only when Claude makes the same mistake twice or a review catches something Claude should have known.
+- Last restructured 2026-11-03 for the metrics-to-AI direction.
+-->
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# T1D Engine
 
-## Project Overview
+Personal data system for a Dexcom CGM and Tandem Control-IQ pump user. It ingests pump and CGM data, cleans it, computes validated glycemic and insulin metrics, and (next) gives those metrics to an LLM that supports diabetes management and lifestyle decisions.
 
-T1D Engine is a Type 1 diabetes data intelligence system. It ingests CGM + insulin pump data, detects events (missed meals, anomalies), clusters daily BG patterns, and surfaces insights via a live Telegram alert loop, a Next.js personal dashboard, and a local Streamlit dashboard. Read `TECHNICAL_SPEC.md` before writing any code.
+## Current direction (decided 2026-10-29)
+
+- The live missed-meal alert loop (`apps/personal/cron/`, `api/index.py`) is paused. Don't extend it or fix it unless asked.
+- The main line of work, in order: data foundation, then validated metrics, then a metric suite, then an AI layer with its own evaluation.
+- Correctness of data and metrics matters more than speed or features. A wrong metric flows into everything built on it.
 
 ## Commands
 
 ```bash
-# Dependencies (uses uv, not pip)
-uv sync
-
-# Run
-uv run python main.py
-
-# Tests
-uv run pytest
-uv run pytest tests/test_specific.py
-uv run pytest tests/test_specific.py::test_function_name
-
-# Jupyter notebook
-uv run jupyter notebook research.ipynb
-```
-
-## Architecture
-
-The ingestion + enrichment + detection layers are in place, and three surfaces are shipped: a live Telegram meal-rise alert loop, a Next.js personal dashboard (Vercel + Supabase), and a local Streamlit dashboard. Current layout:
-
-- `core/` — storage-agnostic library shared by every deployment shell. Houses the `Storage` Protocol (`core/storage/protocol.py`), the schema registry (`core/schema.py`), typed metadata records (`core/storage/records.py`), and three implementations (`core/storage/parquet.py`, `core/storage/memory.py`, `core/storage/supabase.py`). The pandas → Postgres converters that `SupabaseStorage` and the bootstrap script share live in `core/storage/_postgres_converters.py`. `core/detection/` holds the shared windowing helper and the meal-rise detector.
-- `ingestion/` — tconnectsync client, per-event-type builders, enrichment (`bolus_category`, `forced_by_alarm`, `site_issues`, `cgm_gaps`), parquet storage shim (`ingestion/storage.py` delegates to `ParquetStorage`), shared view-mode helper (`view_data.py`).
-- `detection/` — typed `AppConfig` + `daily_features` patterns-layer foundation. Source-agnostic: pure DataFrame-in / DataFrame-out, no ingestion imports. v1 reference implementation (anomaly / meal / clustering) is quarantined under `detection/legacy/` — see its README. `detection/calibration/` holds the M2 meal-rise scoring module.
-- `apps/local/` — local Streamlit OSS dashboard: day view, heatmap, TIR panel, insulin, AGP, compare — Plotly charts. Runs against parquet files with no cloud accounts required. AGP percentiles come from `core/metrics/agp.py`.
-- `apps/web/` — Next.js personal dashboard deployed on Vercel + Supabase. Routes: day view, heatmap, TIR trends, insulin panel, search, compare, AGP, alerts history, status. All `/api/*` data routes require a signed-in session (`lib/api/auth.ts`).
-- `apps/personal/cron/` — live meal-rise alert loop: polls Dexcom every 5 min, runs the detector, sends a Telegram alert on a missed-meal signal. Invoked by the Vercel Python worker at `api/index.py` (a separate Vercel project), triggered by external cron-job.org.
-- `apps/personal/telegram/` — deterministic Telegram command surface (`/today`, `/yesterday`, `/trends`, `/status`, `/help`). Webhook entrypoint `api/telegram.py` (same cron-worker Vercel project). No LLM — pure aggregates over the Storage layer; secret-token + chat-allowlist auth.
-- `core/metrics/` — shared metric definitions (AGP hourly percentile profile); pure pandas/numpy, consumed by local charts and mirrored by web SQL.
-- `db/migrations/` — Supabase schema migrations and RLS policies.
-- `.github/workflows/` — nightly Tandem sync (Telegram alert on failure), manual meal-rise fallback, smoke test, and pytest CI.
-- `scripts/` — CLI entry points: `sanity_check` (check), `daily_viz` (viz), `doctor`; `score_meal_rise.py` (M2 calibration report — advisory only).
-- `tests/` — 1078 passed, 43 skipped, 48 deselected in the default suite across builders, storage, enrichment, detection features/config, the `core/metrics/` clinical-analytics suite (golden + hypothesis property tests), CLI, the storage Protocol contract suite under `tests/core/`, and Telegram command/digest/handler tests under `tests/personal/` (supabase-parameterized tests skip unless `SUPABASE_TEST_URL` is set; integration-marked tests are deselected by default). 47 additional `legacy`-marked tests cover `detection/legacy/*` and run opt-in via `uv run pytest -m legacy`. The web shell has its own vitest suite (175 tests) + `tsc --noEmit` + `next build`, gated in CI alongside pytest.
-
-### `core/` package boundary
-
-The `core/` package is the storage-agnostic library that both the personal deployment shell (Next.js + Vercel + Supabase) and the OSS local shell (Streamlit + parquet/SQLite) consume. Import rules are binding:
-
-- `core/` MAY import from: stdlib, pandas, numpy, pydantic, typing/Protocol.
-- `core/` MAY NOT import from: `ingestion/`, `scripts/`, `apps/`, `psycopg2`, `supabase-py`, parquet-specific code outside `core/storage/parquet.py`, Vercel SDK, Streamlit, FastAPI, Telegram libs, LLM clients.
-- Backend-specific concrete code (psycopg2 calls, parquet I/O) lives in `core/storage/parquet.py`, `core/storage/supabase.py`, and `core/storage/_postgres_converters.py`. Those are the ONLY files allowed to import their respective backend SDKs.
-- Code in `core/` never decides which backend to use; the shell instantiates a `Storage` implementation at startup and passes it down via constructor injection.
-- New downstream code (detection v2, the live alert loop, the Tandem→Supabase sync, the dashboard backend) takes a `Storage` via DI from the start.
-
-### Storage abstraction
-
-The `Storage` Protocol in `core/storage/protocol.py` is the backend-agnostic data layer every caller talks to. Phase 1 (this PR family) landed the Protocol, the schema registry, and three implementations: `ParquetStorage` (local files), `InMemoryStorage` (tests), and `SupabaseStorage` (Postgres via psycopg2) — all three validated by parameterized contract tests under `tests/core/test_storage_contract.py`. The supabase parameterization skips unless `SUPABASE_TEST_URL` is set, and refuses to run against any host that matches a production-host denylist. The existing `ingestion/storage.py` is still a thin shim over `ParquetStorage` so every pre-Protocol caller (fetch, view, detection, `bootstrap_supabase`) keeps working unchanged — migrating existing callers to take a `Storage` via DI is deferred to follow-up PRs (live alert loop, Tandem nightly sync, dashboard backend, Telegram handlers).
-
-SupabaseStorage callers MUST use the transaction-mode pooler URL (`*.pooler.supabase.com:6543`) and an open-do-close lifecycle (context manager for short-lived via `SupabaseStorage.from_pooler_url(url)`, caller-managed conn via `SupabaseStorage(conn=...)` for long-lived). Direct connections (`db.*.supabase.co:5432`) are reserved for the nightly GitHub Action and the one-shot `scripts/bootstrap_supabase.py`. The Postgres-side `idle_in_transaction_session_timeout = '5min'` set by migration 0002 is the belt-and-suspenders backstop. On the transaction pooler, never issue session-level `SET`s (including psycopg2 `readonly=True` combined with autocommit, which becomes `SET default_transaction_read_only = on`), because session state leaks to other clients on the shared backend; as a defence `SupabaseStorage` forces every non-autocommit connection to open `BEGIN READ WRITE` transactions.
-
-#### RLS model
-
-Migration `0003_enable_rls.sql` enables Row-Level Security on every public table under a four-role threat model. `postgres` (psycopg2 with the DB password — used by `bootstrap_supabase.py`, the GitHub Action nightly sync, and `SupabaseStorage`) and `service_role` (Supabase JWT for server-side admin calls — used by future Vercel API routes) both have the `BYPASSRLS` attribute and are unaffected by RLS. `authenticated` (Supabase JWT for signed-in users) and `anon` (Supabase JWT for unauthenticated requests, the key embedded in client bundles) are subject to RLS.
-
-Each of the 13 public tables carries one permissive policy: `auth_required_all FOR ALL TO authenticated USING (true) WITH CHECK (true)`. `anon` has no policy on any table, so the default-deny behaviour applies — anon-key requests see zero rows everywhere. This is the minimum-viable lockdown for the current single-user shape; per-row ownership (`USING (user_id = auth.uid())`) is deferred until a multi-user story exists.
-
-Implication for new code: server-side handlers that need admin access should connect via `service_role` (or the postgres role through `SupabaseStorage`) and rely on application-level authorization. Client-side handlers (Next.js bundles, future Streamlit pages with `@supabase/supabase-js`) MUST go through the anon key + Supabase Auth and rely on RLS for tenant isolation — they cannot read or write any public table without a signed-in `authenticated` session.
-
-When you finish a substantive change, write a dated `docs/updates/YYYY-MM-DD-*.md` entry rather than mutating prior updates. The dated trail is the audit log.
-
-### Data Pipeline
-
-Two ingestion modes:
-1. **Historical**: Tandem CSV exports (in `data/`) and tconnectsync, synced nightly to Supabase via a GitHub Actions workflow.
-2. **Live**: pydexcom polls the Dexcom Share API every 5 minutes. The live loop (`apps/personal/cron/`) runs the meal-rise detector on each new reading and fires a Telegram alert when a missed-meal signal is detected. The loop is invoked by a Vercel Python worker (`api/index.py`) triggered by cron-job.org.
-
-The detection engine must be **source-agnostic** — it operates on normalized data regardless of ingestion source.
-
-### View Modes (`check` / `viz`)
-
-`check` and `viz` both accept `--view {original,enriched}` (default `original`):
-
-```bash
+uv sync                                   # Python deps (uv, never pip)
+uv sync --group local                     # adds Streamlit/Plotly for the local dashboard
+uv run pytest -q                          # default suite (legacy and integration tests excluded)
+uv run pytest tests/path/test_x.py::test_name
+uv run pytest -m legacy                   # opt-in: detection/legacy tests
+uv run python main.py doctor              # check on-disk parquet matches PIPELINE_VERSION
+uv run python main.py update              # incremental pump fetch into data/processed/
 uv run python main.py check --date YYYY-MM-DD [--view enriched]
-uv run python main.py viz   --date YYYY-MM-DD [--view enriched]
+uv run python main.py dashboard           # local Streamlit dashboard
 ```
 
-- `original` — hides enrichment columns/overlays; preserves pre-enrichment output for regression comparisons.
-- `enriched` — adds `bolus_category` / `override_delta` / `forced_by_alarm` sections to `check` and forced-site / site-issue / `cgm_gaps`-based OOR shading overlays to `viz`. Backfilled in memory if the parquets on disk predate enrichment; on-disk files are never mutated.
+Web app (`apps/web/`): `npm run lint`, `npx tsc --noEmit`, `npm run test`, `npm run build`. CI runs all four plus pytest.
 
-Shared backfill lives in `ingestion/view_data.ensure_enriched`; `scripts/run_detection` and both CLI commands all delegate to it.
+## Layout
 
-### CSV Format (Tandem Export)
+- `ingestion/`: tconnectsync client, event builders, enrichment, log redaction, pipeline version
+- `core/`: storage-agnostic library. `core/storage/` (Storage Protocol plus Parquet, Supabase and InMemory backends), `core/schema.py`, `core/metrics/` (glycemic metrics, AGP, risk indices, variability), `core/detection/` (windowing, meal-rise detector)
+- `detection/`: typed config, `daily_features`, M2 calibration scoring. `detection/legacy/` is quarantined v1 code
+- `apps/local/`: Streamlit dashboard over parquet, no cloud accounts needed
+- `apps/web/`: Next.js dashboard on Vercel and Supabase
+- `apps/personal/`: paused live loop and the Telegram command handlers
+- `db/migrations/`: Supabase schema and RLS
+- `scripts/`: CLI tools, nightly sync, CI log gate, Telegram setup
+- `config/user_config.yaml`: every threshold and personal parameter
+- `docs/decisions/`: one record per data rule or metric definition
+- `docs/operating_docs/`: technical spec, data catalog, data issues, deploy runbook
+- `docs/updates/`: dated, append-only session write-ups (the audit log)
 
-Each CSV contains **three sections** separated by blank lines, each with its own header row:
-1. **EGV (CGM readings)**: `DeviceType,SerialNumber,Description,EventDateTime,Readings (mg/dL)` — lines 7–7413
-2. **Manual BG**: `DeviceType,SerialNumber,Description,EventDateTime,BG (mg/dL),Note` — should be **ignored** per spec
-3. **Bolus data**: `Type,BolusType,BolusDeliveryMethod,BG (mg/dL),SerialNumber,CompletionDateTime,InsulinDelivered,FoodDelivered,CorrectionDelivered,...` — lines 7542+
+`data/`, `test_data/` and `research/` are gitignored and exist only on the owner's machine. Never commit data files.
 
-The first 6 lines are a metadata header (device info, software version, report date). Ingestion must parse these sections separately.
+## Rules that apply everywhere
 
-### Key Directories
+### Privacy (the repo and its Actions logs are public)
 
-- `data/` — real patient CSV exports and `data/processed/*.parquet` (do not commit new data files without asking)
-- `test_data/` — anonymized copies for testing
-- `core/` — storage-agnostic Protocol library (`core/schema.py`, `core/storage/`)
-- `ingestion/` — tconnectsync client, builders, enrichment, storage shim, view-mode helper
-- `detection/` — typed config + `daily_features` patterns-layer foundation. `detection/legacy/` holds the v1 reference implementation (not maintained, not imported from production code). `detection/calibration/` holds the M2 meal-rise scoring module.
-- `core/detection/` — shared windowing helper and meal-rise detector (used by the live loop).
-- `apps/local/` — local Streamlit OSS dashboard (day/heatmap/TIR, Plotly).
-- `apps/web/` — Next.js personal dashboard (Vercel + Supabase, Phase A routes).
-- `apps/personal/cron/` — live Dexcom poll → detect → Telegram alert loop; `api/index.py` is the Vercel Python worker that invokes it.
-- `db/migrations/` — Supabase schema and RLS migrations.
-- `.github/workflows/` — nightly Tandem sync, manual meal-rise fallback, smoke test, pytest CI.
-- `scripts/` — CLI entry points (`sanity_check`, `daily_viz`, `doctor`)
-- `tests/` — pytest suite (1078 passed / 43 skipped / 48 deselected by default, plus 47 legacy-marked tests opt-in via `-m legacy`); Storage Protocol contract suite and `core/metrics/` analytics tests under `tests/core/`
-- `docs/operating_docs/` — `TECHNICAL_SPEC.md`, `DATA_CATALOG.md`, `DATA_NOTES.md`, `DATA_NOTES_2.md`, `DATA_ISSUES.md`, `api_levels.md`, `tconnectsync_api_map.md`
-- `docs/updates/` — dated session write-ups (`YYYY-MM-DD-*.md`); append-only audit log
-- `research.ipynb` — exploratory analysis notebook
+- IMPORTANT: never log, print, commit or paste into a PR any pump serial (mask as `…1234`), Tandem or Dexcom account or device ID, UUID, name, date of birth, email, token, or raw API dump.
+- Personal health values (therapy settings, dated BG readings, per-day stats) stay out of committed docs, tests and fixtures. Use synthetic data in tests.
+- Workflow output goes through `scripts/ci_log_gate.py`, and Python logging goes through `ingestion/redaction.py`. Don't bypass either.
+- A committed log forced a full git-history rewrite on 2026-10-14. Commit SHAs cited in docs before that date are stale.
 
-## Critical Rules
+### Health output boundary
 
-- **Do not extend `detection/legacy/`; do not import from it in production code.** v2 modules land at the top level of `detection/` (or `detection/v2/` if symmetry with legacy is preferred when v2 ships).
-- **Never hardcode thresholds or personal parameters.** All config lives in `config/user_config.yaml` (see `TECHNICAL_SPEC.md` for schema). Detection logic reads from config at runtime.
-- **Real-time detection uses trailing window only** — no future BG context available.
-- **Bump `ingestion.pipeline_version.PIPELINE_VERSION` (and add a changelog entry) whenever a builder or enricher changes output schema or timestamp semantics in a way that invalidates existing `data/processed/*.parquet`.** Run `uv run python main.py doctor` to confirm on-disk data matches the code.
-- **The repo and its GitHub Actions logs are public.** Never log, print, or commit pump serials (mask as `…1234`), Tandem/Dexcom account or device IDs/UUIDs, names, date of birth, emails, tokens, or raw API/metadata dumps. Scan any tool output (e.g. tconnectsync check logs) for PII before committing it — a committed log forced a full git-history rewrite on 2026-10-14, so commit SHAs cited in docs before that date are stale.
-- Python 3.12+ required. Dependencies managed with `uv` (see `pyproject.toml`).
-- ML stack: scikit-learn, xgboost, lightgbm, statsmodels, scipy.
+- Everything the system produces is an observation about the data. Never write code, prompts or copy that recommends an insulin dose or a specific settings change.
+- Nothing in this repo controls or writes to the pump. It only reads.
+
+### Code boundaries
+
+- `core/` may import only stdlib, pandas, numpy, pydantic and typing. It never imports `ingestion/`, `scripts/`, `apps/`, backend SDKs, web frameworks, Telegram or LLM clients.
+- Backend SDK imports are allowed only in `core/storage/parquet.py`, `core/storage/supabase.py` and `core/storage/_postgres_converters.py`.
+- Callers receive a `Storage` by constructor injection. Code in `core/` never picks a backend.
+- Thresholds and personal parameters come from `config/user_config.yaml`, never literals in code.
+- Don't extend or import `detection/legacy/` from production code.
+- Bump `PIPELINE_VERSION` and add a `PIPELINE_VERSION_CHANGELOG` entry in `ingestion/pipeline_version.py` whenever a builder or enricher changes output schema or timestamp semantics.
+
+## How work is done here
+
+- Agents open PRs. Only the owner merges. Never merge, force-push `main`, or change production config, secrets or deployments.
+- Before writing code for a new data rule or metric, there must be a decision record in `docs/decisions/` (template: `docs/decisions/0000-template.md`). If none exists, write the record first and stop for review.
+- One decision per PR. Keep PRs small enough to review in about 15 minutes.
+- Every metric or cleaning rule gets tests with hand-checkable known answers, taken from its decision record.
+- Before calling work done, run the relevant checks and report the actual commands and results. Say plainly what wasn't verified. Don't describe a PR as reviewed unless a separate review actually ran.
+- After a substantive change, add a `docs/updates/YYYY-MM-DD-<topic>.md` entry. Never edit earlier entries.
+- When something is unclear about the owner's intent or a health-data judgment call, ask rather than guess.
+
+## Reference docs
+
+- `docs/operating_docs/TECHNICAL_SPEC.md`: schema, storage layer and config reference. Its detection and roadmap sections predate the 2026-10-29 direction, so treat them as history.
+- `docs/operating_docs/DATA_ISSUES.md`: known data-quality problems. Check it before writing any cleaning rule.
+- `docs/operating_docs/DEPLOY.md`: deployment and Telegram setup runbook.
